@@ -1,8 +1,8 @@
 """
 Dynamic Batch Anything Node
 
-结合了 batchAnything 的批处理功能，使用 inputcount 参数控制输入数量
-支持批处理多个任意类型的输入，用户可以通过设置 inputcount 参数并点击更新来调整输入端口数量
+动态批处理任意类型输入；根据现有输入端口的使用情况在前端自动添加/移除输入端口，
+无需按钮与 inputcount 参数。
 """
 
 import torch
@@ -15,6 +15,29 @@ try:
 except ImportError:
     # 如果无法导入，使用简单的字符串替代
     any_type = "*"
+
+
+class FlexibleOptionalInputType(dict):
+    """用于可变可选输入的类型容器。
+
+    - 任何未显式声明的 key，在被访问时都返回 (type,) 作为其类型定义
+    - __contains__ 始终返回 True，从而允许前端动态增加可选输入端口
+    """
+
+    def __init__(self, type, data=None):
+        self.type = type
+        self.data = data or {}
+        # 将初始数据映射到自身，使其在 UI 上可见
+        for k, v in self.data.items():
+            self[k] = v
+
+    def __getitem__(self, key):
+        if key in self.data:
+            return self.data[key]
+        return (self.type,)
+
+    def __contains__(self, key):
+        return True
 
 class DynamicBatchAnything:
     """
@@ -30,20 +53,18 @@ class DynamicBatchAnything:
     
     DESCRIPTION = """
 Dynamic batch processing for any type of data.
-You can set how many inputs the node has,
-with the **inputcount** and clicking update.
+Automatically grows/shrinks input ports based on usage.
 """
     
     @classmethod
     def INPUT_TYPES(cls):
+        # 使用可变可选输入；提供两个初始输入端口
         return {
-            "required": {
-                "inputcount": ("INT", {"default": 2, "min": 2, "max": 1000, "step": 1}),
+            "required": {},
+            "optional": FlexibleOptionalInputType(any_type, {
                 "input_1": (any_type,),
-            },
-            "optional": {
                 "input_2": (any_type,),
-            }
+            }),
         }
 
     RETURN_TYPES = (any_type,)
@@ -143,13 +164,18 @@ with the **inputcount** and clicking update.
                 # 如果无法连接，返回列表
                 return [item_1, item_2]
 
-    def dynamic_batch(self, inputcount, **kwargs):
+    def dynamic_batch(self, **kwargs):
         """动态批处理函数"""
-        # 收集所有非None的输入
+        # 收集所有非None的输入（按 input_编号 排序）
         valid_inputs = []
-        for i in range(1, inputcount + 1):
-            input_key = f"input_{i}"
-            if input_key in kwargs and kwargs[input_key] is not None:
+        input_keys = [k for k in kwargs.keys() if isinstance(k, str) and k.startswith("input_")]
+        def _key_to_index(k: str) -> int:
+            try:
+                return int(k.split("_")[1])
+            except Exception:
+                return 0
+        for input_key in sorted(input_keys, key=_key_to_index):
+            if kwargs.get(input_key, None) is not None:
                 valid_inputs.append(kwargs[input_key])
         
         # 如果没有有效输入，返回None
@@ -175,5 +201,5 @@ NODE_CLASS_MAPPINGS = {
 
 # 节点显示名称映射
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DynamicBatchAnything": "VVL Dynamic Batch Anything",
+    "DynamicBatchAnything": "VVL Dynamic Batch Any",
 }
