@@ -1,6 +1,8 @@
 import json
 import re
+import ast
 from comfy.comfy_types.node_typing import IO
+
 
 class JsonObjectDeduplicator:
     """
@@ -343,12 +345,159 @@ class ApplyUrlsToJson:
 
 
 
+class IndexUrlPairDeduplicator:
+    """
+    移除 (index, url) 对列表中的重复项。
+    
+    支持三种策略：
+    - remove_all: 完全删除所有重复项（包括第一次出现的）
+    - keep_first: 保留第一个出现的重复项
+    - keep_last: 保留最后一个出现的重复项
+    
+    支持多种输入格式，如 [[idx, url], ...] 或 ["idx,url", ...]
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "idx_url_list": (IO.ANY, {}),
+            },
+            "optional": {
+                "preserve_order": (IO.BOOLEAN, {"default": True, "label_on": "保持顺序", "label_off": "不保证顺序"}),
+                "duplicate_strategy": (["keep_first", "keep_last", "remove_all"], {"default": "remove_all"}),
+            },
+        }
+    
+    RETURN_TYPES = (IO.ANY,)
+    RETURN_NAMES = ("deduplicated_pairs",)
+    FUNCTION = "deduplicate_pairs"
+    CATEGORY = "VVL/json"
+    
+    def _normalize_pairs(self, idx_url_list):
+        """规范化输入数据为 (index, url) 对的列表"""
+        pairs = []
+        if idx_url_list is None:
+            return pairs
+
+        container = idx_url_list
+        if not isinstance(container, (list, tuple)):
+            container = [container]
+
+        for item in container:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                # 直接的 [idx, url] 对
+                pairs.append((item[0], item[1]))
+            elif isinstance(item, str) and "," in item:
+                # CR_IntertwineLists 风格: "idx, url"
+                parts = item.split(",", 1)
+                if len(parts) == 2:
+                    try:
+                        idx = int(parts[0].strip())
+                        url = parts[1].strip()
+                        pairs.append((idx, url))
+                    except ValueError:
+                        continue
+            elif hasattr(item, '__iter__') and not isinstance(item, str):
+                # 嵌套容器 - 递归展开
+                for subitem in item:
+                    if isinstance(subitem, (list, tuple)) and len(subitem) >= 2:
+                        pairs.append((subitem[0], subitem[1]))
+        
+        return pairs
+    
+    def deduplicate_pairs(self, idx_url_list, preserve_order=True, duplicate_strategy="remove_all", **kwargs):
+        """去除重复的 (index, url) 对"""
+        try:
+            pairs = self._normalize_pairs(idx_url_list)
+            
+            if not pairs:
+                return (idx_url_list,)
+            
+            # 统计每个键出现的次数
+            key_counts = {}
+            for idx, url in pairs:
+                key = (idx, url)
+                key_counts[key] = key_counts.get(key, 0) + 1
+            
+            if duplicate_strategy == "remove_all":
+                # 移除所有重复项（包括第一次出现的）
+                if preserve_order:
+                    deduplicated = []
+                    for idx, url in pairs:
+                        key = (idx, url)
+                        # 只保留出现次数为1的项
+                        if key_counts[key] == 1:
+                            deduplicated.append([idx, url])
+                else:
+                    # 不保证顺序，直接过滤
+                    unique_keys = {k: [k[0], k[1]] for k, count in key_counts.items() if count == 1}
+                    deduplicated = list(unique_keys.values())
+                    
+            elif duplicate_strategy == "keep_first":
+                # 保留第一个出现的
+                if preserve_order:
+                    seen = set()
+                    deduplicated = []
+                    for idx, url in pairs:
+                        key = (idx, url)
+                        if key not in seen:
+                            seen.add(key)
+                            deduplicated.append([idx, url])
+                else:
+                    seen = {}
+                    for idx, url in pairs:
+                        key = (idx, url)
+                        if key not in seen:
+                            seen[key] = [idx, url]
+                    deduplicated = list(seen.values())
+                    
+            elif duplicate_strategy == "keep_last":
+                # 保留最后一个出现的
+                if preserve_order:
+                    seen = set()
+                    deduplicated = []
+                    for idx, url in pairs:
+                        key = (idx, url)
+                        if key in seen:
+                            # 移除之前添加的相同项
+                            deduplicated = [pair for pair in deduplicated 
+                                          if (pair[0], pair[1]) != key]
+                        seen.add(key)
+                        deduplicated.append([idx, url])
+                else:
+                    # 不保证顺序，保留最后一个
+                    seen = {}
+                    for idx, url in pairs:
+                        key = (idx, url)
+                        seen[key] = [idx, url]
+                    deduplicated = list(seen.values())
+            
+            print(f"IndexUrlPairDeduplicator: 输入 {len(pairs)} 对，输出 {len(deduplicated)} 对")
+            print(f"策略: {duplicate_strategy}")
+            print(f"去重前: {pairs}")
+            print(f"去重后: {deduplicated}")
+            
+            # 输出重复项统计信息
+            duplicates = {k: count for k, count in key_counts.items() if count > 1}
+            if duplicates:
+                print(f"发现的重复项: {duplicates}")
+            
+            return (deduplicated,)
+            
+        except Exception as e:
+            error_msg = f"去重处理错误: {str(e)}"
+            print(f"IndexUrlPairDeduplicator error: {error_msg}")
+            return (idx_url_list,)
+
+
 # Node class mappings
 NODE_CLASS_MAPPINGS = {
     "JsonObjectDeduplicator": JsonObjectDeduplicator,
     "JsonObjectMerger": JsonObjectMerger,
     "JsonExtractSubjectNamesScales": JsonExtractSubjectNamesScales,
     "ApplyUrlsToJson": ApplyUrlsToJson,
+    "IndexUrlPairDeduplicator": IndexUrlPairDeduplicator
 }
 
 # Node display name mappings
@@ -357,4 +506,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "JsonObjectMerger": "VVL JSON Object Merger",
     "JsonExtractSubjectNamesScales": "VVL JSON Extract: subject, names, scales",
     "ApplyUrlsToJson": "VVL Apply URLs to JSON",
+    "IndexUrlPairDeduplicator": "VVL Index-URL Pair Deduplicator",
 }
