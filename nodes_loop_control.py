@@ -37,6 +37,7 @@ class VVLForLoopStartAsync:
         return {
             "required": {
                 "total": ("INT", {"default": 1, "min": 1, "max": 100000, "step": 1}),
+                "parallel": ("BOOLEAN", {"default": True}),
             },
             "optional": {
                 "initial_value%d" % i: (any_type,) for i in range(1, MAX_FLOW_NUM)
@@ -55,7 +56,7 @@ class VVLForLoopStartAsync:
 
     CATEGORY = "VVL/Loop"
 
-    def for_loop_start(self, total, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
+    def for_loop_start(self, total, parallel=True, prompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
         graph = GraphBuilder()
         i = 0
         if "initial_value0" in kwargs:
@@ -63,7 +64,9 @@ class VVLForLoopStartAsync:
 
         initial_values = {("initial_value%d" % num): kwargs.get("initial_value%d" % num, None) for num in
                           range(1, MAX_FLOW_NUM)}
-        while_open = graph.node("VVL whileLoopStart", condition=total, initial_value0=i, **initial_values)
+        # 这里创建一个占位 whileOpen 节点，供 End 节点通过 rawLink 获取到 open 的内部节点 id
+        # 注意：并发模式下我们仍保留该占位节点，以便 End 能定位循环体边界
+        while_open = graph.node("VVL whileLoopStart", condition=True, initial_value0=i, **initial_values)
         outputs = [kwargs.get("initial_value%d" % num, None) for num in range(1, MAX_FLOW_NUM)]
         return {
             "result": tuple(["stub", i] + outputs),
@@ -97,7 +100,148 @@ class VVLForLoopEndAsync:
 
     CATEGORY = "VVL/Loop"
 
+    def _explore_dependencies(self, node_id, dynprompt, upstream, parent_ids):
+        node_info = dynprompt.get_node(node_id)
+        if "inputs" not in node_info:
+            return
+
+        for k, v in node_info["inputs"].items():
+            if is_link(v):
+                parent_id = v[0]
+                display_id = dynprompt.get_display_node_id(parent_id)
+                display_node = dynprompt.get_node(display_id)
+                class_type = display_node["class_type"]
+                if class_type not in ['VVL forLoopEnd', 'VVL whileLoopEnd']:
+                    parent_ids.append(display_id)
+                if parent_id not in upstream:
+                    upstream[parent_id] = []
+                    self._explore_dependencies(parent_id, dynprompt, upstream, parent_ids)
+
+                upstream[parent_id].append(node_id)
+
+    def _collect_contained(self, node_id, upstream, contained):
+        if node_id not in upstream:
+            return
+        for child_id in upstream[node_id]:
+            if child_id not in contained:
+                contained[child_id] = True
+                self._collect_contained(child_id, upstream, contained)
+
+    def _build_parallel(self, flow, dynprompt, unique_id, kwargs):
+        graph = GraphBuilder()
+
+        while_open = flow[0]
+        total = None
+        initial_from_start = {}
+        parallel_flag = False
+
+        # 通过 dynprompt 获取 start 节点设置
+        forstart_node = dynprompt.get_node(while_open)
+        if forstart_node['class_type'] == 'VVL forLoopStart':
+            inputs = forstart_node['inputs']
+            total = inputs.get('total', None)
+            parallel_flag = inputs.get('parallel', False)
+            for i in range(MAX_FLOW_NUM):
+                key = f"initial_value{i}"
+                if key in inputs:
+                    initial_from_start[key] = inputs[key]
+
+        # 仅当 total 为 int 且 parallel 为 True 时并发展开
+        if not isinstance(total, int) or not parallel_flag or total <= 0:
+            return None
+
+        # 收集 open 与 end 之间的子图
+        upstream = {}
+        parent_ids = []
+        self._explore_dependencies(unique_id, dynprompt, upstream, parent_ids)
+        parent_ids = list(set(parent_ids))
+
+        contained = {}
+        open_node = flow[0]
+        self._collect_contained(open_node, upstream, contained)
+        contained[unique_id] = True
+        contained[open_node] = True
+
+        contained_ids = list(contained.keys())
+
+        # 为每个迭代索引克隆子图
+        clone_map = {}
+        for idx in range(total):
+            clone_map[idx] = {}
+            for node_id in contained_ids:
+                original_node = dynprompt.get_node(node_id)
+                # 创建克隆节点（不覆写 display_id，避免冲突）
+                clone = graph.node(original_node["class_type"], f"{node_id}__{idx}")
+                clone_map[idx][node_id] = clone
+
+        # 连接每个克隆的输入
+        for idx in range(total):
+            for node_id in contained_ids:
+                original_node = dynprompt.get_node(node_id)
+                clone = clone_map[idx][node_id]
+                inputs_dict = original_node.get("inputs", {})
+                for k, v in inputs_dict.items():
+                    if is_link(v) and v[0] in contained:
+                        parent = clone_map[idx][v[0]]
+                        clone.set_input(k, parent.out(v[1]))
+                    else:
+                        # 若该输入来自 forLoopStart 且为索引，注入当前 idx
+                        if is_link(v):
+                            try:
+                                parent_display_id = dynprompt.get_display_node_id(v[0])
+                                parent_display_node = dynprompt.get_node(parent_display_id)
+                                parent_class_type = parent_display_node["class_type"]
+                            except Exception:
+                                parent_class_type = None
+
+                            if parent_class_type == 'VVL forLoopStart' and (k == 'index' or original_node["class_type"] == 'VVL listGetItem'):
+                                clone.set_input(k, idx)
+                                continue
+
+                        clone.set_input(k, v)
+
+                # 特殊处理 forLoopStart：为每个克隆设置不同的 index（initial_value0）
+                if original_node["class_type"] == 'VVL forLoopStart':
+                    clone.set_input("initial_value0", idx)
+                    for i in range(1, MAX_FLOW_NUM):
+                        key = f"initial_value{i}"
+                        if key in initial_from_start:
+                            clone.set_input(key, initial_from_start[key])
+
+        # 根据 forLoopEnd 的输入，聚合每个需要输出的值为列表
+        results = []
+        for i in range(1, MAX_FLOW_NUM):
+            key = f"initial_value{i}"
+            v = kwargs.get(key, None)
+            if v is None or not is_link(v):
+                # 未连接，返回 None
+                results.append(None)
+                continue
+
+            src_node_id, src_out = v[0], v[1]
+
+            # 对每个 idx，取对应克隆的输出，打包为列表
+            pack_inputs = {}
+            for idx in range(total):
+                if src_node_id not in clone_map[idx]:
+                    # 如果链接源不在子图中，降级为原值
+                    pack_inputs[f"item{idx}"] = v
+                else:
+                    pack_inputs[f"item{idx}"] = clone_map[idx][src_node_id].out(src_out)
+
+            pack_node = graph.node("VVL listConstruct", **pack_inputs)
+            results.append(pack_node.out(0))
+
+        return {
+            "result": tuple(results),
+            "expand": graph.finalize(),
+        }
+
     def for_loop_end(self, flow, dynprompt=None, extra_pnginfo=None, unique_id=None, **kwargs):
+        # 优先尝试并发展开
+        parallel_result = self._build_parallel(flow, dynprompt, unique_id, kwargs)
+        if parallel_result is not None:
+            return parallel_result
         graph = GraphBuilder()
         while_open = flow[0]
         total = None
@@ -360,6 +504,78 @@ class VVLCompareAsync:
             return (False,)
 
 
+class VVLListConstructAsync:
+    @classmethod
+    def INPUT_TYPES(cls):
+        # 预留足够多的可选 item 输入，满足常见并发规模
+        optional_items = {f"item{i}": (any_type,) for i in range(0, 1024)}
+        return {
+            "required": {},
+            "optional": optional_items,
+        }
+
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ("list",)
+    FUNCTION = "build"
+    CATEGORY = "VVL/Utils"
+
+    def build(self, **kwargs):
+        items = []
+        # 保证按索引顺序聚合
+        for i in range(0, 1024):
+            key = f"item{i}"
+            if key in kwargs:
+                items.append(kwargs[key])
+            else:
+                break
+        return (items,)
+
+
+class VVLListGetItemAsync:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "list": (any_type,),
+                "index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ("item",)
+    FUNCTION = "get_item"
+    CATEGORY = "VVL/Utils"
+
+    def get_item(self, list, index):
+        try:
+            # 标准列表或可下标序列
+            if hasattr(list, '__getitem__'):
+                length = None
+                try:
+                    length = len(list)
+                except Exception:
+                    length = None
+
+                if length is not None and length > 0:
+                    if index >= length:
+                        index = index % length
+                return (list[index],)
+
+            # 可迭代但不可直接下标，尝试转为列表
+            try:
+                materialized = list if isinstance(list, list.__class__) else [x for x in list]
+            except Exception:
+                materialized = None
+            if materialized is not None and len(materialized) > 0:
+                if index >= len(materialized):
+                    index = index % len(materialized)
+                return (materialized[index],)
+        except Exception:
+            pass
+        # 回退：返回原值
+        return (list,)
+
+
 # 节点注册
 NODE_CLASS_MAPPINGS = {
     "VVL forLoopStart": VVLForLoopStartAsync,
@@ -368,6 +584,8 @@ NODE_CLASS_MAPPINGS = {
     "VVL whileLoopEnd": VVLWhileLoopEndAsync,
     "VVL mathInt": VVLMathIntAsync,
     "VVL compare": VVLCompareAsync,
+    "VVL listConstruct": VVLListConstructAsync,
+    "VVL listGetItem": VVLListGetItemAsync,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -377,4 +595,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VVL whileLoopEnd": "VVL While Loop End (Async)",
     "VVL mathInt": "VVL Math Int (Async)",
     "VVL compare": "VVL Compare (Async)",
+    "VVL listConstruct": "VVL List Construct (Async)",
+    "VVL listGetItem": "VVL List Get Item (Async)",
 }
