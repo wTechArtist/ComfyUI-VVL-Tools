@@ -127,6 +127,74 @@ class VVLForLoopEndAsync:
                 contained[child_id] = True
                 self._collect_contained(child_id, upstream, contained)
 
+    def _resolve_int_input(self, dynprompt, val):
+        """尽量把 val 解析成编译期可用的 int；失败返回 None"""
+        # 已经是整数
+        if isinstance(val, int):
+            return val
+
+        # 是 link：尝试顺藤摸瓜
+        try:
+            if is_link(val):
+                src_id, _ = val[0], val[1] if isinstance(val, (list, tuple)) and len(val) > 1 else (val[0], 0)
+                node = dynprompt.get_node(src_id)
+                ct = node.get("class_type", "")
+
+                # 1) 解析 Length Any 类节点（名字可能因插件不同而异，只要有 "any" 输入即可）
+                if "length" in ct.lower() or ("length" in node.get("label", "").lower()):
+                    any_in = node.get("inputs", {}).get("any", None)
+                    # 如果 any 是 link，进一步解析其常量列表长度
+                    length = None
+                    if is_link(any_in):
+                        any_src = dynprompt.get_node(any_in[0])
+                        any_ct = any_src.get("class_type", "")
+
+                        # 1.1) String List：从文本解析
+                        if "string" in any_ct.lower() and "list" in any_ct.lower():
+                            cfg = any_src.get("inputs", {})
+                            text = str(cfg.get("list", "") or "")
+                            use_nl = bool(cfg.get("new_line_as_separator", True))
+                            sep = str(cfg.get("separator", ","))
+                            items = [s for s in (text.splitlines() if use_nl else text.split(sep)) if str(s).strip() != ""]
+                            length = len(items)
+
+                        # 1.2) VVL listConstruct：统计 itemN 个数
+                        elif "listconstruct" in any_ct.lower():
+                            cnt = 0
+                            for i in range(0, 1024):
+                                if f"item{i}" in any_src.get("inputs", {}):
+                                    cnt += 1
+                                else:
+                                    break
+                            length = cnt
+
+                    # 如果 any 直接是常量 list（极少见），也可直接 len()
+                    if length is None:
+                        any_val = node.get("inputs", {}).get("any", None)
+                        if isinstance(any_val, list):
+                            length = len(any_val)
+
+                    if isinstance(length, int):
+                        return length
+
+                # 2) 解析 VVL mathInt（递归解析 a、b）
+                if "math" in ct.lower() and "int" in ct.lower():
+                    op = node.get("inputs", {}).get("operation", "add")
+                    a = node.get("inputs", {}).get("a", 0)
+                    b = node.get("inputs", {}).get("b", 0)
+                    ai = self._resolve_int_input(dynprompt, a)
+                    bi = self._resolve_int_input(dynprompt, b)
+                    if isinstance(ai, int) and isinstance(bi, int):
+                        if op == "add":      return ai + bi
+                        if op == "subtract": return ai - bi
+                        if op == "multiply": return ai * bi
+                        if op == "divide":   return (ai // bi) if bi != 0 else 0
+                        if op == "modulo":   return (ai % bi) if bi != 0 else 0
+
+        except Exception:
+            pass
+        return None
+
     def _build_parallel(self, flow, dynprompt, unique_id, kwargs):
         graph = GraphBuilder()
 
@@ -140,6 +208,8 @@ class VVLForLoopEndAsync:
         if forstart_node['class_type'] == 'VVL forLoopStart':
             inputs = forstart_node['inputs']
             total = inputs.get('total', None)
+            # 新增：尝试把 total 解析为 int
+            total = self._resolve_int_input(dynprompt, total)
             parallel_flag = inputs.get('parallel', False)
             for i in range(MAX_FLOW_NUM):
                 key = f"initial_value{i}"
