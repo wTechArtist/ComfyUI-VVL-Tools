@@ -32,12 +32,23 @@ class async_sleep_v1:
         return {
             "required": {
                 "test1": (any_type,),   
+                "sleep_mode": (["constant", "random"], {
+                    "default": "constant",
+                    "tooltip": "睡眠模式：常量时间或随机时间"
+                }),
                 "sleep_time": ("FLOAT", {
+                    "default": 1.0, 
+                    "min": 0.1, 
+                    "max": 60.0, 
+                    "step": 0.1,
+                    "tooltip": "常量模式下的睡眠时间，或随机模式下的最小时间，单位秒"
+                }),
+                "max_sleep_time": ("FLOAT", {
                     "default": 5.0, 
                     "min": 0.1, 
-                    "max": 10, 
+                    "max": 60.0, 
                     "step": 0.1,
-                    "tooltip": "睡眠时间，单位秒"
+                    "tooltip": "随机模式下的最大睡眠时间，单位秒（仅在随机模式下生效）"
                 }),
             }
         }
@@ -47,18 +58,26 @@ class async_sleep_v1:
     FUNCTION = "process"
     CATEGORY = "VVL/utils"
     
-    async def process(self, test1, sleep_time):
-
-        await asyncio.sleep(sleep_time)
-        # await asyncio.sleep()
+    async def process(self, test1, sleep_mode, sleep_time, max_sleep_time):
+        # 根据睡眠模式计算实际睡眠时间
+        if sleep_mode == "random":
+            # 确保最小时间不大于最大时间
+            min_time = min(sleep_time, max_sleep_time)
+            max_time = max(sleep_time, max_sleep_time)
+            # 生成随机浮点数时间
+            actual_sleep_time = random.uniform(min_time, max_time)
+        else:
+            # 常量模式
+            actual_sleep_time = sleep_time
+        
+        # 执行异步睡眠
+        await asyncio.sleep(actual_sleep_time)
     
         # 如果test1是字符串，则添加"_url"后缀；否则直接返回原值
         if isinstance(test1, str):
             return (test1 + "_url",)
         else:
             return (test1,)
-
-        # return (test1 + "_url",)
 
 
 
