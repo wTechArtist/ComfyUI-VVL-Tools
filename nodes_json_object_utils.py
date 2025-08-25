@@ -692,6 +692,246 @@ class JsonArrayElementFieldExtractor:
                 return (error_msg,)
 
 
+class JsonRotationScaleAdjuster:
+    """
+    JSON旋转值和缩放调整器
+    
+    对JSON数据中所有对象的rotation和scale值进行批量调整：
+    • 支持对X、Y、Z轴旋转值分别进行加减操作
+    • 支持对X、Y、Z轴缩放值分别进行乘法操作
+    • 可处理场景JSON文件中的所有objects
+    • 保持原有的数据结构和格式
+    
+    🔄 功能特性：
+    • 批量处理：一次性调整所有对象的旋转值和缩放值
+    • 轴向控制：分别控制X、Y、Z轴的旋转偏移和缩放因子
+    • 旋转范围：每个轴的调整范围为-360°到+360°
+    • 缩放范围：每个轴的缩放因子范围为0.001到1000
+    • 安全处理：自动跳过没有相应字段的对象
+    
+    ⚙️ 参数说明：
+    • rotation_order: 旋转值顺序重排（XYZ, XZY, YXZ, YZX, ZXY, ZYX）
+    • rotation_x_offset: X轴旋转偏移量（度）
+    • rotation_y_offset: Y轴旋转偏移量（度）  
+    • rotation_z_offset: Z轴旋转偏移量（度）
+    • scale_x_multiplier: X轴缩放乘法因子
+    • scale_y_multiplier: Y轴缩放乘法因子
+    • scale_z_multiplier: Z轴缩放乘法因子
+    
+    📝 使用场景：
+    • 场景整体旋转调整
+    • 视角方向修正
+    • 批量对象朝向调整
+    • 坐标系转换补偿
+    • 批量尺寸缩放调整
+    • 比例修正和适配
+    
+    💡 注意事项：
+    • 只处理包含相应字段且格式正确的对象
+    • rotation和scale字段必须是长度≥3的数组
+    • rotation顺序调换在偏移量计算之前执行
+    • 角度计算不会自动规范化到0-360范围
+    • 缩放使用乘法，1.0表示保持原尺寸
+    
+    🔄 旋转顺序说明：
+    • XYZ: [x, y, z] - 默认顺序
+    • XZY: [x, z, y] - X不变，Y和Z互换
+    • YXZ: [y, x, z] - X和Y互换，Z不变
+    • YZX: [y, z, x] - Y→X, Z→Y, X→Z
+    • ZXY: [z, x, y] - Z→X, X→Y, Y→Z
+    • ZYX: [z, y, x] - Z和X互换，Y不变
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "json_text": (IO.STRING, {"multiline": True, "default": "", "tooltip": "包含objects数组的JSON数据\n支持场景描述文件格式\n将对所有对象的rotation和scale值进行调整"})
+            },
+            "optional": {
+                "rotation_order": (["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"], {
+                    "default": "YXZ",
+                    "tooltip": "旋转值的顺序重排\n• XYZ: [x, y, z] - 默认顺序\n• XZY: [x, z, y] - Y和Z互换\n• YXZ: [y, x, z] - X和Y互换\n• YZX: [y, z, x] - 循环右移\n• ZXY: [z, x, y] - 循环左移\n• ZYX: [z, y, x] - X和Z互换\n注意：重排在偏移量计算之前执行"
+                }),
+                "rotation_x_offset": (IO.FLOAT, {
+                    "default": 0.0, 
+                    "min": -360.0, 
+                    "max": 360.0, 
+                    "step": 0.1,
+                    "tooltip": "X轴旋转偏移量（度）\n正值：绕X轴正方向旋转\n负值：绕X轴负方向旋转\n范围：-360° 到 +360°\n注意：在rotation_order重排后应用"
+                }),
+                "rotation_y_offset": (IO.FLOAT, {
+                    "default": -90.0, 
+                    "min": -360.0, 
+                    "max": 360.0, 
+                    "step": 0.1,
+                    "tooltip": "Y轴旋转偏移量（度）\n正值：绕Y轴正方向旋转\n负值：绕Y轴负方向旋转\n范围：-360° 到 +360°\n注意：在rotation_order重排后应用"
+                }),
+                "rotation_z_offset": (IO.FLOAT, {
+                    "default": 0.0, 
+                    "min": -360.0, 
+                    "max": 360.0, 
+                    "step": 0.1,
+                    "tooltip": "Z轴旋转偏移量（度）\n正值：绕Z轴正方向旋转\n负值：绕Z轴负方向旋转\n范围：-360° 到 +360°\n注意：在rotation_order重排后应用"
+                }),
+                "scale_x_multiplier": (IO.FLOAT, {
+                    "default": 0.01, 
+                    "min": 0.001, 
+                    "max": 1000.0, 
+                    "step": 0.001,
+                    "tooltip": "X轴缩放乘法因子\n1.0：保持原尺寸\n0.5：缩小一半\n2.0：放大一倍\n范围：0.001 到 1000"
+                }),
+                "scale_y_multiplier": (IO.FLOAT, {
+                    "default": 0.01, 
+                    "min": 0.001, 
+                    "max": 1000.0, 
+                    "step": 0.001,
+                    "tooltip": "Y轴缩放乘法因子\n1.0：保持原尺寸\n0.5：缩小一半\n2.0：放大一倍\n范围：0.001 到 1000"
+                }),
+                "scale_z_multiplier": (IO.FLOAT, {
+                    "default": 0.01, 
+                    "min": 0.001, 
+                    "max": 1000.0, 
+                    "step": 0.001,
+                    "tooltip": "Z轴缩放乘法因子\n1.0：保持原尺寸\n0.5：缩小一半\n2.0：放大一倍\n范围：0.001 到 1000"
+                }),
+            },
+        }
+    
+    RETURN_TYPES = (IO.STRING,)
+    RETURN_NAMES = ("adjusted_json",)
+    FUNCTION = "adjust_rotations_and_scales"
+    CATEGORY = "VVL/json"
+    
+    def _reorder_rotation(self, rotation_values, order):
+        """根据指定顺序重新排列rotation值"""
+        x, y, z = rotation_values[0], rotation_values[1], rotation_values[2]
+        
+        order_map = {
+            "XYZ": [x, y, z],  # 默认顺序
+            "XZY": [x, z, y],  # Y和Z互换
+            "YXZ": [y, x, z],  # X和Y互换
+            "YZX": [y, z, x],  # 循环右移：Y→X, Z→Y, X→Z
+            "ZXY": [z, x, y],  # 循环左移：Z→X, X→Y, Y→Z
+            "ZYX": [z, y, x],  # X和Z互换
+        }
+        
+        return order_map.get(order, [x, y, z])
+
+    def adjust_rotations_and_scales(self, json_text, rotation_order="XYZ", rotation_x_offset=0.0, rotation_y_offset=0.0, rotation_z_offset=0.0, 
+                                   scale_x_multiplier=1.0, scale_y_multiplier=1.0, scale_z_multiplier=1.0, **kwargs):
+        """调整JSON中所有对象的rotation和scale值"""
+        try:
+            # 解析输入JSON
+            data = json.loads(json_text)
+            
+            # 检查是否有objects字段
+            if 'objects' not in data or not isinstance(data['objects'], list):
+                print("JsonRotationScaleAdjuster: 未找到有效的objects数组")
+                return (json_text,)
+            
+            objects = data['objects']
+            rotation_processed = 0
+            scale_processed = 0
+            skipped_count = 0
+            
+            # 遍历所有对象并调整rotation和scale值
+            for i, obj in enumerate(objects):
+                if not isinstance(obj, dict):
+                    skipped_count += 1
+                    continue
+                
+                obj_processed = False
+                
+                # 处理rotation字段
+                if 'rotation' in obj:
+                    rotation = obj['rotation']
+                    
+                    # 检查rotation是否为有效的列表格式
+                    if isinstance(rotation, list) and len(rotation) >= 3:
+                        try:
+                            # 确保原始值是数值类型
+                            original_values = [float(rotation[0]), float(rotation[1]), float(rotation[2])]
+                            
+                            # 1. 首先按照指定顺序重新排列rotation值
+                            reordered_values = self._reorder_rotation(original_values, rotation_order)
+                            
+                            # 2. 然后在重排后的值上应用偏移量
+                            new_x = reordered_values[0] + rotation_x_offset
+                            new_y = reordered_values[1] + rotation_y_offset
+                            new_z = reordered_values[2] + rotation_z_offset
+                            
+                            # 更新rotation值
+                            obj['rotation'][0] = new_x
+                            obj['rotation'][1] = new_y
+                            obj['rotation'][2] = new_z
+                            
+                            rotation_processed += 1
+                            obj_processed = True
+                            
+                        except (ValueError, TypeError) as e:
+                            print(f"JsonRotationScaleAdjuster: 对象 {i} 的rotation值转换失败: {e}")
+                    else:
+                        print(f"JsonRotationScaleAdjuster: 对象 {i} 的rotation格式无效: {rotation}")
+                
+                # 处理scale字段
+                if 'scale' in obj:
+                    scale = obj['scale']
+                    
+                    # 检查scale是否为有效的列表格式
+                    if isinstance(scale, list) and len(scale) >= 3:
+                        try:
+                            # 确保原始值是数值类型
+                            original_x = float(scale[0])
+                            original_y = float(scale[1]) 
+                            original_z = float(scale[2])
+                            
+                            # 计算新的缩放值
+                            new_x = original_x * scale_x_multiplier
+                            new_y = original_y * scale_y_multiplier
+                            new_z = original_z * scale_z_multiplier
+                            
+                            # 更新scale值
+                            obj['scale'][0] = new_x
+                            obj['scale'][1] = new_y
+                            obj['scale'][2] = new_z
+                            
+                            scale_processed += 1
+                            obj_processed = True
+                            
+                        except (ValueError, TypeError) as e:
+                            print(f"JsonRotationScaleAdjuster: 对象 {i} 的scale值转换失败: {e}")
+                    else:
+                        print(f"JsonRotationScaleAdjuster: 对象 {i} 的scale格式无效: {scale}")
+                
+                # 如果对象没有被处理，增加跳过计数
+                if not obj_processed:
+                    skipped_count += 1
+            
+            # 生成处理后的JSON
+            adjusted_json = json.dumps(data, ensure_ascii=False, indent=2)
+            
+            # 输出处理统计信息
+            print(f"JsonRotationScaleAdjuster 处理完成:")
+            print(f"  • Rotation处理: {rotation_processed} 个对象")
+            print(f"  • Scale处理: {scale_processed} 个对象")
+            print(f"  • 跳过处理: {skipped_count} 个对象")
+            print(f"  • 旋转顺序: {rotation_order}")
+            print(f"  • 旋转偏移: X={rotation_x_offset}°, Y={rotation_y_offset}°, Z={rotation_z_offset}°")
+            print(f"  • 缩放因子: X={scale_x_multiplier}, Y={scale_y_multiplier}, Z={scale_z_multiplier}")
+            
+            return (adjusted_json,)
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON解析错误: {str(e)}"
+            print(f"JsonRotationScaleAdjuster error: {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+        except Exception as e:
+            error_msg = f"处理旋转值和缩放值时出错: {str(e)}"
+            print(f"JsonRotationScaleAdjuster error: {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+
+
 class DimensionReorderAndScale:
     """
     三维数据重新排序和缩放节点
@@ -877,6 +1117,7 @@ NODE_CLASS_MAPPINGS = {
     "JsonMarkdownCleaner": JsonMarkdownCleaner,
     "IndexUrlPairDeduplicator": IndexUrlPairDeduplicator,
     "JsonArrayElementFieldExtractor": JsonArrayElementFieldExtractor,
+    "JsonRotationScaleAdjuster": JsonRotationScaleAdjuster,
     "DimensionReorderAndScale": DimensionReorderAndScale
 }
 
@@ -889,5 +1130,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "JsonMarkdownCleaner": "VVL JSON Markdown Cleaner",
     "IndexUrlPairDeduplicator": "VVL Index-URL Pair Deduplicator",
     "JsonArrayElementFieldExtractor": "VVL JSON Array Element Field Extractor",
+    "JsonRotationScaleAdjuster": "VVL JSON Rotation & Scale Adjuster",
     "DimensionReorderAndScale": "VVL Dimension Reorder and Scale",
 }
