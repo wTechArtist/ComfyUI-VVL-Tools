@@ -50,6 +50,10 @@ class async_sleep_v1:
                     "step": 0.1,
                     "tooltip": "随机模式下的最大睡眠时间，单位秒（仅在随机模式下生效）"
                 }),
+                "add_url_suffix": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "是否为字符串添加'_url'后缀"
+                }),
             }
         }
     
@@ -58,7 +62,7 @@ class async_sleep_v1:
     FUNCTION = "process"
     CATEGORY = "VVL/utils"
     
-    async def process(self, test1, sleep_mode, sleep_time, max_sleep_time):
+    async def process(self, test1, sleep_mode, sleep_time, max_sleep_time, add_url_suffix):
         # 根据睡眠模式计算实际睡眠时间
         if sleep_mode == "random":
             # 确保最小时间不大于最大时间
@@ -73,8 +77,8 @@ class async_sleep_v1:
         # 执行异步睡眠
         await asyncio.sleep(actual_sleep_time)
     
-        # 如果test1是字符串，则添加"_url"后缀；否则直接返回原值
-        if isinstance(test1, str):
+        # 根据开关决定是否为字符串添加"_url"后缀
+        if add_url_suffix and isinstance(test1, str):
             return (test1 + "_url",)
         else:
             return (test1,)
