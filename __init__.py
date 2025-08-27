@@ -4,11 +4,15 @@ A collection of custom nodes for ComfyUI
 """
 
 import logging
+import os
 logger = logging.getLogger(__name__)
 
 # 导入节点映射
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
+
+# 声明web目录以支持前端扩展
+WEB_DIRECTORY = os.path.join(os.path.dirname(__file__), "web")
 
 # 从各个模块导入节点
 try:
@@ -48,4 +52,4 @@ except ImportError as e:
     logger.warning(f"Failed to load batch anything dynamic node: {e}")
 
 # 导出给ComfyUI
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']

@@ -33,7 +33,40 @@ class ByPassTypeTuple(tuple):
         return super().__getitem__(index)
 
 
+class FlexibleOptionalInputType(dict):
+    """用于可变可选输入的类型容器，支持动态输入端口。
+    
+    - 任何未显式声明的 key，在被访问时都返回 (type,) 作为其类型定义
+    - __contains__ 始终返回 True，从而允许前端动态增加可选输入端口
+    """
+
+    def __init__(self, type_def, data=None):
+        self.type_def = type_def
+        self.data = data or {}
+        # 将初始数据映射到自身，使其在 UI 上可见
+        for k, v in self.data.items():
+            self[k] = v
+
+    def __getitem__(self, key):
+        if key in self.data:
+            return self.data[key]
+        return (self.type_def,)
+
+    def __contains__(self, key):
+        return True
+
+
 class VVLForLoopStartAsync:
+    """
+    VVL For Loop Start节点 - 支持动态输入端口
+    
+    功能特点：
+    1. 支持动态添加/删除initial_value输入端口
+    2. 自动调整输出端口数量以匹配输入
+    3. 支持并行和顺序执行模式
+    4. 保持与原有实现的兼容性
+    """
+    
     def __init__(self):
         pass
 
@@ -44,9 +77,9 @@ class VVLForLoopStartAsync:
                 "total": ("INT", {"default": 1, "min": 1, "max": 100000, "step": 1}),
                 "parallel": ("BOOLEAN", {"default": True}),
             },
-            "optional": {
-                "initial_value%d" % i: (any_type,) for i in range(1, MAX_FLOW_NUM)
-            },
+            "optional": FlexibleOptionalInputType(any_type, {
+                "initial_value1": (any_type,),
+            }),
             "hidden": {
                 "initial_value0": (any_type,),
                 "prompt": "PROMPT",
@@ -68,12 +101,35 @@ class VVLForLoopStartAsync:
             i = kwargs["initial_value0"]
             logger.debug(f"[VVL] for_loop_start: unique_id={unique_id}, initial_value0={i}, total={total}")
 
-        initial_values = {("initial_value%d" % num): kwargs.get("initial_value%d" % num, None) for num in
-                          range(1, MAX_FLOW_NUM)}
+        # 动态收集所有initial_value输入
+        initial_values = {}
+        outputs = []
+        
+        # 首先收集所有传入的initial_value参数
+        for key, value in kwargs.items():
+            if key.startswith("initial_value") and key != "initial_value0":
+                initial_values[key] = value
+                
+        # 按数字顺序排序并生成输出
+        sorted_keys = sorted([k for k in initial_values.keys()], 
+                           key=lambda x: int(x.replace("initial_value", "") or "0"))
+        
+        # 补齐到MAX_FLOW_NUM以保持兼容性
+        for num in range(1, MAX_FLOW_NUM):
+            key = f"initial_value{num}"
+            if key not in initial_values:
+                initial_values[key] = None
+                
+        # 生成输出（按顺序）
+        for num in range(1, MAX_FLOW_NUM):
+            key = f"initial_value{num}"
+            outputs.append(initial_values.get(key, None))
+        
+        logger.debug(f"[VVL] for_loop_start: 动态输入数量={len([k for k in kwargs.keys() if k.startswith('initial_value') and k != 'initial_value0'])}")
+        
         # 这里创建一个占位 whileOpen 节点，供 End 节点通过 rawLink 获取到 open 的内部节点 id
         # 注意：并发模式下我们仍保留该占位节点，以便 End 能定位循环体边界
         while_open = graph.node("VVL whileLoopStart", condition=True, initial_value0=i, **initial_values)
-        outputs = [kwargs.get("initial_value%d" % num, None) for num in range(1, MAX_FLOW_NUM)]
         return {
             "result": tuple(["stub", i] + outputs),
             "expand": graph.finalize(),
@@ -81,6 +137,16 @@ class VVLForLoopStartAsync:
 
 
 class VVLForLoopEndAsync:
+    """
+    VVL For Loop End节点 - 支持动态输入端口
+    
+    功能特点：
+    1. 支持动态添加/删除initial_value输入端口
+    2. 自动调整输出端口数量以匹配输入
+    3. 支持并行展开和顺序执行
+    4. 与ForLoopStart节点配合工作
+    """
+    
     def __init__(self):
         pass
 
@@ -90,9 +156,9 @@ class VVLForLoopEndAsync:
             "required": {
                 "flow": ("FLOW_CONTROL", {"rawLink": True}),
             },
-            "optional": {
-                "initial_value%d" % i: (any_type, {"rawLink": True}) for i in range(1, MAX_FLOW_NUM)
-            },
+            "optional": FlexibleOptionalInputType(any_type, {
+                "initial_value1": (any_type, {"rawLink": True}),
+            }),
             "hidden": {
                 "dynprompt": "DYNPROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
@@ -671,8 +737,16 @@ class VVLForLoopEndAsync:
                         # 这是内层循环，保持原始的initial_value0（通常为0）
                         pass  # 不修改，保持原始输入
 
-        # 根据 forLoopEnd 的输入，聚合每个需要输出的值为列表
+        # 根据 forLoopEnd 的输入，聚合每个需要输出的值为列表（动态处理）
         results = []
+        
+        # 首先收集所有实际传入的initial_value参数
+        actual_inputs = {}
+        for key, value in kwargs.items():
+            if key.startswith("initial_value") and value is not None:
+                actual_inputs[key] = value
+        
+        # 按MAX_FLOW_NUM处理，以保持兼容性
         for i in range(1, MAX_FLOW_NUM):
             key = f"initial_value{i}"
             v = kwargs.get(key, None)
@@ -752,8 +826,17 @@ class VVLForLoopEndAsync:
         # 比较：下一个索引 < total
         cond = graph.node("VVL compare", a=sub.out(0), b=total, comparison='a < b')
         
-        input_values = {("initial_value%d" % i): kwargs.get("initial_value%d" % i, None) for i in
-                        range(1, MAX_FLOW_NUM)}
+        # 动态收集input_values，支持任意数量的initial_value输入
+        input_values = {}
+        for key, value in kwargs.items():
+            if key.startswith("initial_value"):
+                input_values[key] = value
+        
+        # 补齐到MAX_FLOW_NUM以保持兼容性
+        for i in range(1, MAX_FLOW_NUM):
+            key = f"initial_value{i}"
+            if key not in input_values:
+                input_values[key] = None
         
         while_close = graph.node("VVL whileLoopEnd",
                                  flow=flow,
