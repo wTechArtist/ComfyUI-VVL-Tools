@@ -1,29 +1,51 @@
 """
-ComfyUI VVL Test Nodes
-
-This package contains custom nodes for various utilities:
-1. JsonObjectDeduplicator - Remove duplicate objects based on name and scale
-2. JsonObjectMerger - Merge processed JSON with removed duplicates
-3. DynamicBatchAnything - Dynamic batch processing for any type of data
-4. VVL Loop Control Nodes - For/While loop control with async support
-5. TensorListPreview - Preview special format tensor lists with shape [1, H, W, 3]
-
-Author: VVL Test
-Version: 1.0.0
+ComfyUI-VVL-Tools
+A collection of custom nodes for ComfyUI
 """
 
-from .nodes_json_object_utils import NODE_CLASS_MAPPINGS as JSON_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as JSON_DISPLAY_MAPPINGS
-from .execution_blocker_utils import NODE_CLASS_MAPPINGS as BLOCKER_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as BLOCKER_DISPLAY_MAPPINGS
-from .batch_anything_dynamic import NODE_CLASS_MAPPINGS as BATCH_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as BATCH_DISPLAY_MAPPINGS
-from .enhanced_lambert_renderer_node import NODE_CLASS_MAPPINGS as RENDERER_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as RENDERER_DISPLAY_MAPPINGS
-from .nodes_loop_control import NODE_CLASS_MAPPINGS as LOOP_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as LOOP_DISPLAY_MAPPINGS
-from .tensor_list_preview import NODE_CLASS_MAPPINGS as TENSOR_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as TENSOR_DISPLAY_MAPPINGS
-from .list_chunk_any import NODE_CLASS_MAPPINGS as CHUNK_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as CHUNK_DISPLAY_MAPPINGS
-# 合并所有节点映射
-NODE_CLASS_MAPPINGS = {**JSON_MAPPINGS, **BLOCKER_MAPPINGS, **BATCH_MAPPINGS, **RENDERER_MAPPINGS, **LOOP_MAPPINGS, **TENSOR_MAPPINGS, **CHUNK_MAPPINGS}
-NODE_DISPLAY_NAME_MAPPINGS = {**JSON_DISPLAY_MAPPINGS, **BLOCKER_DISPLAY_MAPPINGS, **BATCH_DISPLAY_MAPPINGS, **RENDERER_DISPLAY_MAPPINGS, **LOOP_DISPLAY_MAPPINGS, **TENSOR_DISPLAY_MAPPINGS, **CHUNK_DISPLAY_MAPPINGS}
+import logging
+logger = logging.getLogger(__name__)
 
-# 让前端自动加载 web/ 下的脚本（如 js 扩展）
-WEB_DIRECTORY = "./web"
+# 导入节点映射
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}
 
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
+# 从各个模块导入节点
+try:
+    from .nodes_loop_control import NODE_CLASS_MAPPINGS as LOOP_MAPPINGS
+    from .nodes_loop_control import NODE_DISPLAY_NAME_MAPPINGS as LOOP_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(LOOP_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(LOOP_DISPLAY_MAPPINGS)
+    logger.info("Loaded loop control nodes")
+except ImportError as e:
+    logger.warning(f"Failed to load loop control nodes: {e}")
+
+try:
+    from .list_chunk_any import NODE_CLASS_MAPPINGS as CHUNK_MAPPINGS
+    from .list_chunk_any import NODE_DISPLAY_NAME_MAPPINGS as CHUNK_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(CHUNK_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(CHUNK_DISPLAY_MAPPINGS)
+    logger.info("Loaded list chunk node")
+except ImportError as e:
+    logger.warning(f"Failed to load list chunk node: {e}")
+
+try:
+    from .execution_blocker_utils import NODE_CLASS_MAPPINGS as BLOCKER_MAPPINGS
+    from .execution_blocker_utils import NODE_DISPLAY_NAME_MAPPINGS as BLOCKER_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(BLOCKER_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(BLOCKER_DISPLAY_MAPPINGS)
+    logger.info("Loaded execution blocker utils")
+except ImportError as e:
+    logger.warning(f"Failed to load execution blocker utils: {e}")
+
+try:
+    from .batch_anything_dynamic import NODE_CLASS_MAPPINGS as BATCH_MAPPINGS
+    from .batch_anything_dynamic import NODE_DISPLAY_NAME_MAPPINGS as BATCH_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(BATCH_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(BATCH_DISPLAY_MAPPINGS)
+    logger.info("Loaded batch anything dynamic node")
+except ImportError as e:
+    logger.warning(f"Failed to load batch anything dynamic node: {e}")
+
+# 导出给ComfyUI
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']

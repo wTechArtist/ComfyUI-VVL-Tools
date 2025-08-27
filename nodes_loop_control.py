@@ -66,6 +66,7 @@ class VVLForLoopStartAsync:
         i = 0
         if "initial_value0" in kwargs:
             i = kwargs["initial_value0"]
+            logger.debug(f"[VVL] for_loop_start: unique_id={unique_id}, initial_value0={i}, total={total}")
 
         initial_values = {("initial_value%d" % num): kwargs.get("initial_value%d" % num, None) for num in
                           range(1, MAX_FLOW_NUM)}
@@ -106,16 +107,38 @@ class VVLForLoopEndAsync:
     CATEGORY = "VVL/Loop"
 
     def _explore_dependencies(self, node_id, dynprompt, upstream, parent_ids):
-        node_info = dynprompt.get_node(node_id)
+        try:
+            node_info = dynprompt.get_node(node_id)
+        except Exception:
+            # 尝试将克隆 display_id 还原为原始 id（形如 16__2 -> 16）
+            try:
+                base_id = str(node_id).split("__")[0]
+                node_info = dynprompt.get_node(base_id)
+                node_id = base_id
+            except Exception:
+                # 如果节点仍不存在（例如外层克隆在当前上下文不可见），跳过
+                return
+        
         if "inputs" not in node_info:
             return
 
         for k, v in node_info["inputs"].items():
             if is_link(v):
                 parent_id = v[0]
-                display_id = dynprompt.get_display_node_id(parent_id)
-                display_node = dynprompt.get_node(display_id)
-                class_type = display_node["class_type"]
+                try:
+                    display_id = dynprompt.get_display_node_id(parent_id)
+                    try:
+                        display_node = dynprompt.get_node(display_id)
+                    except Exception:
+                        # 回退到原始 id（去掉 __idx 后缀）
+                        base_disp = str(display_id).split("__")[0]
+                        display_node = dynprompt.get_node(base_disp)
+                        display_id = base_disp
+                    class_type = display_node["class_type"]
+                except Exception:
+                    # 父节点不存在或不可访问，跳过这个依赖
+                    continue
+                
                 if class_type not in ['VVL forLoopEnd', 'VVL whileLoopEnd']:
                     parent_ids.append(display_id)
                 if parent_id not in upstream:
@@ -144,7 +167,14 @@ class VVLForLoopEndAsync:
         # 是 link：尝试顺藤摸瓜
         try:
             if is_link(val):
-                src_id, _ = val[0], val[1] if isinstance(val, (list, tuple)) and len(val) > 1 else (val[0], 0)
+                # 记录源节点与输出口索引
+                src_id = val[0]
+                src_out = 0
+                try:
+                    if isinstance(val, (list, tuple)) and len(val) > 1:
+                        src_out = int(val[1])
+                except Exception:
+                    src_out = 0
                 logger.debug(f"[VVL] _resolve_int_input: 检测到 link，src_id={src_id}")
                 node = dynprompt.get_node(src_id)
                 ct = node.get("class_type", "")
@@ -166,69 +196,191 @@ class VVLForLoopEndAsync:
                     # 如果 any 是 link，进一步解析其常量列表长度
                     length = None
                     if is_link(any_in):
-                        any_src = dynprompt.get_node(any_in[0])
-                        any_ct = any_src.get("class_type", "")
-
-                        # 1.1) String List：从文本解析
-                        if "string" in any_ct.lower() and "list" in any_ct.lower():
-                            logger.debug(f"[VVL] _resolve_int_input: 检测到 String List 节点")
-                            cfg = any_src.get("inputs", {})
-                            text = str(cfg.get("list", "") or "")
-                            use_nl = bool(cfg.get("new_line_as_separator", True))
-                            sep = str(cfg.get("separator", ","))
-                            items = [s for s in (text.splitlines() if use_nl else text.split(sep)) if str(s).strip() != ""]
-                            length = len(items)
-                            logger.debug(f"[VVL] _resolve_int_input: String List 解析出 {length} 个项目: {items[:5]}...")
-
-                        # 1.2) VVL listConstruct：统计 itemN 个数
-                        elif "listconstruct" in any_ct.lower():
-                            logger.debug(f"[VVL] _resolve_int_input: 检测到 VVL listConstruct 节点")
-                            cnt = 0
-                            for i in range(0, 1024):
-                                if f"item{i}" in any_src.get("inputs", {}):
-                                    cnt += 1
-                                else:
-                                    break
-                            length = cnt
-                            logger.debug(f"[VVL] _resolve_int_input: VVL listConstruct 统计出 {length} 个项目")
-
-                        # 1.3) JsonExtractSubjectNamesScales：尝试静态解析 JSON 获取 objects 长度
-                        elif "jsonextractsubjectnamesscales" in any_ct.lower():
-                            logger.debug(f"[VVL] _resolve_int_input: 检测到 JsonExtractSubjectNamesScales 节点，尝试静态解析 JSON")
-                            length = self._try_resolve_length_from_jsonextract(dynprompt, any_src)
-                            logger.debug(f"[VVL] _resolve_int_input: JsonExtractSubjectNamesScales 静态解析长度={length}")
-
-                        # 1.4) ApplyUrlsToJson：可从其输入 JSON 推断 objects 长度
-                        elif "applyurlstojson" in any_ct.lower():
-                            logger.debug(f"[VVL] _resolve_int_input: 检测到 ApplyUrlsToJson 节点，尝试从 deduplicated_json 常量推断长度")
+                        try:
+                            any_src = dynprompt.get_node(any_in[0])
+                        except Exception:
+                            # 尝试处理克隆节点的ID
+                            base_id = str(any_in[0]).split("__")[0]
                             try:
-                                dedup = any_src.get("inputs", {}).get("deduplicated_json", None)
-                                s = self._resolve_constant_string(dynprompt, dedup)
-                                if isinstance(s, str) and s:
-                                    import json as _json
-                                    length = len((_json.loads(s) or {}).get("objects", []))
+                                any_src = dynprompt.get_node(base_id)
                             except Exception as e:
-                                logger.debug(f"[VVL] _resolve_int_input: 解析 ApplyUrlsToJson 时异常: {e}")
+                                logger.debug(f"[VVL] _resolve_int_input: 无法获取源节点 {any_in[0]}: {e}")
+                                any_src = None
+                        
+                        if any_src:
+                            any_ct = any_src.get("class_type", "")
 
-                        # 1.5) 通用 JSON 数组输入键：json_array / array / list
-                        else:
-                            try:
-                                for key in ("json_array", "array", "list"):
-                                    if key in any_src.get("inputs", {}):
-                                        raw = any_src.get("inputs", {}).get(key)
-                                        s = self._resolve_constant_string(dynprompt, raw)
-                                        if isinstance(s, str) and s:
-                                            import json as _json
+                            # 1.0) 特殊情况：listGetItem从chunks列表获取chunk
+                            if "listgetitem" in any_ct.lower():
+                                logger.debug(f"[VVL] _resolve_int_input: Length的输入是listGetItem")
+                                getitem_inputs = any_src.get("inputs", {})
+                                list_input = getitem_inputs.get("list", None)
+                                index_input = getitem_inputs.get("index", None)
+                                
+                                # 尝试获取index值（可能是常量或来自forLoopStart）
+                                index_val = None
+                                if isinstance(index_input, int):
+                                    index_val = index_input
+                                elif is_link(index_input):
+                                    # 如果index来自forLoopStart，在并行展开时会被注入实际值
+                                    # 尝试从节点ID推断index（如果是克隆节点）
+                                    # 例如：9.0.0.7__2 -> index=2
+                                    try:
+                                        node_id_str = str(any_in[0])  # listGetItem的ID
+                                        if "__" in node_id_str:
+                                            index_val = int(node_id_str.split("__")[-1])
+                                            logger.debug(f"[VVL] _resolve_int_input: 从节点ID {node_id_str} 推断index={index_val}")
+                                    except Exception as e:
+                                        logger.debug(f"[VVL] _resolve_int_input: 无法从节点ID推断index: {e}")
+                                
+                                # 检查list_input是否来自listChunk的chunks输出
+                                if is_link(list_input):
+                                    try:
+                                        chunk_src = dynprompt.get_node(list_input[0])
+                                    except Exception:
+                                        base_id = str(list_input[0]).split("__")[0]
+                                        try:
+                                            chunk_src = dynprompt.get_node(base_id)
+                                        except Exception:
+                                            chunk_src = None
+                                    
+                                    if chunk_src and "listchunk" in chunk_src.get("class_type", "").lower():
+                                        logger.debug(f"[VVL] _resolve_int_input: listGetItem的list来自listChunk")
+                                        # 获取listChunk的输入
+                                        chunk_inputs = chunk_src.get("inputs", {})
+                                        chunk_list = chunk_inputs.get("list", None)
+                                        chunk_size = chunk_inputs.get("size", None)
+                                        
+                                        # 解析chunk_size
+                                        size_val = self._resolve_int_input(dynprompt, chunk_size)
+                                        
+                                        # 解析原始列表长度
+                                        list_len = None
+                                        if is_link(chunk_list):
                                             try:
-                                                arr = _json.loads(s)
-                                                if isinstance(arr, list):
-                                                    length = len(arr)
-                                                    logger.debug(f"[VVL] _resolve_int_input: 通用 {key} 常量 JSON 数组长度={length}")
-                                                    break
+                                                list_src = dynprompt.get_node(chunk_list[0])
                                             except Exception:
-                                                pass
-                            except Exception as e:
-                                logger.debug(f"[VVL] _resolve_int_input: 通用 JSON 数组键解析异常: {e}")
+                                                base_id = str(chunk_list[0]).split("__")[0]
+                                                try:
+                                                    list_src = dynprompt.get_node(base_id)
+                                                except Exception:
+                                                    list_src = None
+                                            
+                                            if list_src:
+                                                list_ct = list_src.get("class_type", "")
+                                                # String List
+                                                if "string" in list_ct.lower() and "list" in list_ct.lower():
+                                                    cfg = list_src.get("inputs", {})
+                                                    text = str(cfg.get("list", "") or "")
+                                                    use_nl = bool(cfg.get("new_line_as_separator", True))
+                                                    sep = str(cfg.get("separator", ","))
+                                                    items = [s for s in (text.splitlines() if use_nl else text.split(sep)) if str(s).strip() != ""]
+                                                    list_len = len(items)
+                                                # VVL listConstruct
+                                                elif "listconstruct" in list_ct.lower():
+                                                    cnt = 0
+                                                    for i in range(0, 1024):
+                                                        if f"item{i}" in list_src.get("inputs", {}):
+                                                            cnt += 1
+                                                        else:
+                                                            break
+                                                    list_len = cnt
+                                        
+                                        # 如果成功获取到原始列表长度和chunk大小
+                                        if isinstance(list_len, int) and isinstance(size_val, int) and size_val > 0:
+                                            # 计算chunk的实际长度
+                                            # 注意：在并行展开时，index会被注入实际值（0, 1, 2...）
+                                            # 这里我们无法知道具体的index，但可以根据模式推断
+                                            # 对于嵌套循环，内层的Length通常需要当前chunk的实际长度
+                                            
+                                            # 计算总chunk数
+                                            num_chunks = (list_len + size_val - 1) // size_val
+                                            
+                                            # 如果我们知道具体的index，可以计算准确的chunk长度
+                                            if isinstance(index_val, int):
+                                                if index_val < num_chunks - 1:
+                                                    length = size_val
+                                                else:
+                                                    # 最后一个chunk
+                                                    length = list_len - (num_chunks - 1) * size_val
+                                                logger.debug(f"[VVL] _resolve_int_input: chunk[{index_val}]长度={length} (总长{list_len}, chunk_size={size_val})")
+                                            else:
+                                                # 不知道具体index时，尝试更智能的推断
+                                                # 如果总长度不是chunk_size的整数倍，最后一个chunk会更小
+                                                # 为了安全起见，返回最小可能的chunk长度
+                                                last_chunk_size = list_len - (num_chunks - 1) * size_val
+                                                if last_chunk_size < size_val:
+                                                    # 有一个较小的最后chunk，保守地返回较小值
+                                                    # 这样可以避免越界访问
+                                                    length = min(size_val, last_chunk_size)
+                                                    logger.debug(f"[VVL] _resolve_int_input: 未知index，保守估计chunk长度={length} (可能是最后一个chunk)")
+                                                else:
+                                                    length = size_val
+                                                    logger.debug(f"[VVL] _resolve_int_input: 未知index，假设chunk长度={size_val}")
+                                            return length
+
+                            # 1.1) String List：从文本解析
+                            elif "string" in any_ct.lower() and "list" in any_ct.lower():
+                                logger.debug(f"[VVL] _resolve_int_input: 检测到 String List 节点")
+                                cfg = any_src.get("inputs", {})
+                                text = str(cfg.get("list", "") or "")
+                                use_nl = bool(cfg.get("new_line_as_separator", True))
+                                sep = str(cfg.get("separator", ","))
+                                items = [s for s in (text.splitlines() if use_nl else text.split(sep)) if str(s).strip() != ""]
+                                length = len(items)
+                                logger.debug(f"[VVL] _resolve_int_input: String List 解析出 {length} 个项目: {items[:5]}...")
+
+                            # 1.2) VVL listConstruct：统计 itemN 个数
+                            elif "listconstruct" in any_ct.lower():
+                                logger.debug(f"[VVL] _resolve_int_input: 检测到 VVL listConstruct 节点")
+                                cnt = 0
+                                for i in range(0, 1024):
+                                    if f"item{i}" in any_src.get("inputs", {}):
+                                        cnt += 1
+                                    else:
+                                        break
+                                length = cnt
+                                logger.debug(f"[VVL] _resolve_int_input: VVL listConstruct 统计出 {length} 个项目")
+
+
+
+                            # 1.4) JsonExtractSubjectNamesScales：尝试静态解析 JSON 获取 objects 长度
+                            elif "jsonextractsubjectnamesscales" in any_ct.lower():
+                                logger.debug(f"[VVL] _resolve_int_input: 检测到 JsonExtractSubjectNamesScales 节点，尝试静态解析 JSON")
+                                length = self._try_resolve_length_from_jsonextract(dynprompt, any_src)
+                                logger.debug(f"[VVL] _resolve_int_input: JsonExtractSubjectNamesScales 静态解析长度={length}")
+
+                            # 1.5) ApplyUrlsToJson：可从其输入 JSON 推断 objects 长度
+                            elif "applyurlstojson" in any_ct.lower():
+                                logger.debug(f"[VVL] _resolve_int_input: 检测到 ApplyUrlsToJson 节点，尝试从 deduplicated_json 常量推断长度")
+                                try:
+                                    dedup = any_src.get("inputs", {}).get("deduplicated_json", None)
+                                    s = self._resolve_constant_string(dynprompt, dedup)
+                                    if isinstance(s, str) and s:
+                                        import json as _json
+                                        length = len((_json.loads(s) or {}).get("objects", []))
+                                except Exception as e:
+                                    logger.debug(f"[VVL] _resolve_int_input: 解析 ApplyUrlsToJson 时异常: {e}")
+
+                            # 1.6) 通用 JSON 数组输入键：json_array / array / list
+                            else:
+                                try:
+                                    for key in ("json_array", "array", "list"):
+                                        if key in any_src.get("inputs", {}):
+                                            raw = any_src.get("inputs", {}).get(key)
+                                            s = self._resolve_constant_string(dynprompt, raw)
+                                            if isinstance(s, str) and s:
+                                                import json as _json
+                                                try:
+                                                    arr = _json.loads(s)
+                                                    if isinstance(arr, list):
+                                                        length = len(arr)
+                                                        logger.debug(f"[VVL] _resolve_int_input: 通用 {key} 常量 JSON 数组长度={length}")
+                                                        break
+                                                except Exception:
+                                                    pass
+                                except Exception as e:
+                                    logger.debug(f"[VVL] _resolve_int_input: 通用 JSON 数组键解析异常: {e}")
 
                     # 如果 any 直接是常量 list（极少见），也可直接 len()
                     if length is None:
@@ -241,6 +393,58 @@ class VVLForLoopEndAsync:
                         return length
                     else:
                         logger.debug(f"[VVL] _resolve_int_input: Length 节点解析失败，length={length}")
+
+                # 2) 解析 VVL listChunk：当 total 连接到其 num_chunks 输出时可以静态计算
+                if "listchunk" in ct.lower():
+                    logger.debug(f"[VVL] _resolve_int_input: 检测到 VVL listChunk 节点，尝试静态解析")
+                    try:
+                        inputs = node.get("inputs", {})
+                        list_in = inputs.get("list", None)
+                        size_in = inputs.get("size", None)
+
+                        # 解析 size
+                        size_val = self._resolve_int_input(dynprompt, size_in)
+
+                        # 解析 list 的长度
+                        def _resolve_list_length(val_obj):
+                            try:
+                                if is_link(val_obj):
+                                    any_src = dynprompt.get_node(val_obj[0])
+                                    any_ct = any_src.get("class_type", "")
+                                    # String List
+                                    if "string" in any_ct.lower() and "list" in any_ct.lower():
+                                        cfg = any_src.get("inputs", {})
+                                        text = str(cfg.get("list", "") or "")
+                                        use_nl = bool(cfg.get("new_line_as_separator", True))
+                                        sep = str(cfg.get("separator", ","))
+                                        items = [s for s in (text.splitlines() if use_nl else text.split(sep)) if str(s).strip() != ""]
+                                        return len(items)
+                                    # VVL listConstruct
+                                    if "listconstruct" in any_ct.lower():
+                                        cnt = 0
+                                        for i in range(0, 1024):
+                                            if f"item{i}" in any_src.get("inputs", {}):
+                                                cnt += 1
+                                            else:
+                                                break
+                                        return cnt
+                                # 常量 python 列表
+                                if isinstance(val_obj, list):
+                                    return len(val_obj)
+                            except Exception:
+                                pass
+                            return None
+
+                        list_len = _resolve_list_length(list_in)
+                        logger.debug(f"[VVL] _resolve_int_input: listChunk 静态解析 list_len={list_len}, size={size_val}, src_out={src_out}")
+
+                        # 只有当请求的输出口为 num_chunks(=1) 且两者可解析时才返回
+                        if src_out == 1 and isinstance(list_len, int) and isinstance(size_val, int) and size_val > 0:
+                            num_chunks = (list_len + size_val - 1) // size_val
+                            logger.debug(f"[VVL] _resolve_int_input: 计算得到 num_chunks={num_chunks}")
+                            return num_chunks
+                    except Exception as e:
+                        logger.debug(f"[VVL] _resolve_int_input: 解析 listChunk 异常: {e}")
 
                 # 2) 解析 VVL mathInt（递归解析 a、b）
                 if "math" in ct.lower() and "int" in ct.lower():
@@ -330,8 +534,37 @@ class VVLForLoopEndAsync:
         initial_from_start = {}
         parallel_flag = False
 
+        # 改进的嵌套循环检测：
+        # 1. 检查是否已经是多层嵌套（避免过深的递归）
+        # 2. 允许更深层级的并行展开（提高到4层）
+        nest_level = str(unique_id).count('.')
+        is_cloned = '__' in str(unique_id)
+        
+        # 只在嵌套层级非常深时跳过并行展开（提高限制到4层）
+        if nest_level > 4:
+            logger.debug(f"[VVL] _build_parallel: 嵌套层级过深 (level={nest_level})，跳过并行展开")
+            return None
+        
+        # 如果是克隆节点但嵌套层级合理，仍然尝试并行展开
+        if is_cloned and nest_level <= 4:
+            logger.debug(f"[VVL] _build_parallel: 检测到克隆节点 (level={nest_level})，但层级合理，继续尝试并行展开")
+
         # 通过 dynprompt 获取 start 节点设置
-        forstart_node = dynprompt.get_node(while_open)
+        try:
+            # 对于克隆节点，需要处理可能的 display_id
+            if is_cloned:
+                # 尝试获取原始节点ID（去掉 __idx 后缀）
+                base_id = str(while_open).split("__")[0]
+                try:
+                    forstart_node = dynprompt.get_node(while_open)
+                except Exception:
+                    forstart_node = dynprompt.get_node(base_id)
+            else:
+                forstart_node = dynprompt.get_node(while_open)
+        except Exception as e:
+            logger.debug(f"[VVL] _build_parallel: 无法获取 forLoopStart 节点: {e}，跳过")
+            return None
+            
         logger.debug(f"[VVL] _build_parallel: forLoopStart 节点类型={forstart_node.get('class_type')}")
         if forstart_node['class_type'] == 'VVL forLoopStart':
             inputs = forstart_node['inputs']
@@ -375,8 +608,14 @@ class VVLForLoopEndAsync:
             clone_map[idx] = {}
             for node_id in contained_ids:
                 original_node = dynprompt.get_node(node_id)
-                # 创建克隆节点（不覆写 display_id，避免冲突）
-                clone = graph.node(original_node["class_type"], f"{node_id}__{idx}")
+                # 创建克隆节点，并显式设置 display_id，确保运行期 unique_id 与 prompt 键一致
+                clone_display_id = f"{node_id}__{idx}"
+                original_ct = original_node["class_type"]
+                clone = graph.node(original_ct, clone_display_id)
+                try:
+                    clone.set_override_display_id(clone_display_id)
+                except Exception:
+                    pass
                 clone_map[idx][node_id] = clone
         logger.debug(f"[VVL] _build_parallel: 克隆子图完成")
 
@@ -400,19 +639,37 @@ class VVLForLoopEndAsync:
                             except Exception:
                                 parent_class_type = None
 
-                            if parent_class_type == 'VVL forLoopStart' and (k == 'index' or original_node["class_type"] == 'VVL listGetItem'):
-                                clone.set_input(k, idx)
-                                continue
+                            # 对于依赖 forLoopStart.index 的输入，需要区分外层和内层
+                            if parent_class_type == 'VVL forLoopStart':
+                                # 检查是否是外层循环的forLoopStart
+                                try:
+                                    parent_node_id = v[0]
+                                    if parent_node_id == while_open:
+                                        # 这是外层循环的index，注入当前idx
+                                        if k == 'index' or v[1] == 1:  # index输入或index输出端口
+                                            clone.set_input(k, idx)
+                                            continue
+                                except Exception:
+                                    pass
+                                # 否则保持原始链接（内层循环的index）
 
                         clone.set_input(k, v)
 
                 # 特殊处理 forLoopStart：为每个克隆设置不同的 index（initial_value0）
+                # 但需要区分外层和内层循环
                 if original_node["class_type"] == 'VVL forLoopStart':
-                    clone.set_input("initial_value0", idx)
-                    for i in range(1, MAX_FLOW_NUM):
-                        key = f"initial_value{i}"
-                        if key in initial_from_start:
-                            clone.set_input(key, initial_from_start[key])
+                    # 检查是否是外层循环的forLoopStart（即我们正在并行展开的那个）
+                    # 外层循环的forLoopStart节点ID应该与while_open匹配
+                    if node_id == open_node:
+                        # 这是外层循环，设置不同的idx
+                        clone.set_input("initial_value0", idx)
+                        for i in range(1, MAX_FLOW_NUM):
+                            key = f"initial_value{i}"
+                            if key in initial_from_start:
+                                clone.set_input(key, initial_from_start[key])
+                    else:
+                        # 这是内层循环，保持原始的initial_value0（通常为0）
+                        pass  # 不修改，保持原始输入
 
         # 根据 forLoopEnd 的输入，聚合每个需要输出的值为列表
         results = []
@@ -461,7 +718,23 @@ class VVLForLoopEndAsync:
         forstart_node = dynprompt.get_node(while_open)
         if forstart_node['class_type'] == 'VVL forLoopStart':
             inputs = forstart_node['inputs']
-            total = inputs['total']
+            total_raw = inputs['total']
+            # 在顺序模式下也要解析 total 值
+            total = self._resolve_int_input(dynprompt, total_raw)
+            logger.debug(f"[VVL] for_loop_end: 顺序模式解析 total: {total_raw} -> {total}")
+            # 如果解析失败，回退到原始值
+            if total is None:
+                total = total_raw
+            
+            # 检查initial_value0，确保内层循环从0开始
+            initial_idx = inputs.get('initial_value0', 0)
+            if isinstance(initial_idx, list) and is_link(initial_idx):
+                # 如果initial_value0是一个link，可能来自外层循环
+                # 对于内层循环，应该使用0
+                logger.debug(f"[VVL] for_loop_end: 检测到initial_value0是link，可能是嵌套循环")
+                # 内层循环应该从0开始
+                initial_idx = 0
+            logger.debug(f"[VVL] for_loop_end: initial_value0={initial_idx}")
         elif forstart_node['class_type'] == 'easy loadImagesForLoop':
             inputs = forstart_node['inputs']
             limit = inputs['limit']
@@ -470,10 +743,18 @@ class VVLForLoopEndAsync:
             directory = inputs['directory']
             total = graph.node('easy imagesCountInDirectory', directory=directory, limit=limit, start_index=start_index, extension='*').out(0)
 
-        sub = graph.node("VVL mathInt", operation="add", a=[while_open, 1], b=1)
+        # 获取当前循环的起始值（通常为0）
+        current_index = [while_open, 1]  # 从forLoopStart的index输出获取当前索引
+        
+        # 下一个索引 = 当前索引 + 1
+        sub = graph.node("VVL mathInt", operation="add", a=current_index, b=1)
+        
+        # 比较：下一个索引 < total
         cond = graph.node("VVL compare", a=sub.out(0), b=total, comparison='a < b')
+        
         input_values = {("initial_value%d" % i): kwargs.get("initial_value%d" % i, None) for i in
                         range(1, MAX_FLOW_NUM)}
+        
         while_close = graph.node("VVL whileLoopEnd",
                                  flow=flow,
                                  condition=cond.out(0),
@@ -546,7 +827,16 @@ class VVLWhileLoopEndAsync:
     CATEGORY = "VVL/Loop"
 
     def explore_dependencies(self, node_id, dynprompt, upstream, parent_ids):
-        node_info = dynprompt.get_node(node_id)
+        try:
+            node_info = dynprompt.get_node(node_id)
+        except Exception:
+            # 回退到原始 id（去掉 __idx）
+            try:
+                base_id = str(node_id).split("__")[0]
+                node_info = dynprompt.get_node(base_id)
+                node_id = base_id
+            except Exception:
+                return
         if "inputs" not in node_info:
             return
 
@@ -554,7 +844,12 @@ class VVLWhileLoopEndAsync:
             if is_link(v):
                 parent_id = v[0]
                 display_id = dynprompt.get_display_node_id(parent_id)
-                display_node = dynprompt.get_node(display_id)
+                try:
+                    display_node = dynprompt.get_node(display_id)
+                except Exception:
+                    base_disp = str(display_id).split("__")[0]
+                    display_node = dynprompt.get_node(base_disp)
+                    display_id = base_disp
                 class_type = display_node["class_type"]
                 if class_type not in ['VVL forLoopEnd', 'VVL whileLoopEnd']:
                     parent_ids.append(display_id)
@@ -788,6 +1083,45 @@ class VVLListGetItemAsync:
         return (list,)
 
 
+class VVLListLengthAsync:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "any": (any_type,),
+            }
+        }
+
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("length",)
+    FUNCTION = "get_length"
+    CATEGORY = "VVL/Utils"
+
+    def get_length(self, any):
+        try:
+            # 优先尝试 len()
+            try:
+                return (int(len(any)),)
+            except Exception:
+                pass
+
+            # 可迭代物化
+            try:
+                materialized = [x for x in any]
+                return (int(len(materialized)),)
+            except Exception:
+                pass
+
+            # String List 源常量
+            if isinstance(any, str):
+                lines = [s for s in any.splitlines() if s.strip() != ""]
+                return (len(lines),)
+        except Exception:
+            pass
+        return (0,)
+
+
+
 # 节点注册
 NODE_CLASS_MAPPINGS = {
     "VVL forLoopStart": VVLForLoopStartAsync,
@@ -798,6 +1132,7 @@ NODE_CLASS_MAPPINGS = {
     "VVL compare": VVLCompareAsync,
     "VVL listConstruct": VVLListConstructAsync,
     "VVL listGetItem": VVLListGetItemAsync,
+    "VVL listLength": VVLListLengthAsync,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -809,4 +1144,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VVL compare": "VVL Compare (Async)",
     "VVL listConstruct": "VVL List Construct (Async)",
     "VVL listGetItem": "VVL List Get Item (Async)",
+    "VVL listLength": "VVL List Length (Async)",
 }
