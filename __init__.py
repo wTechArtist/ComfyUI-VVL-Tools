@@ -51,5 +51,14 @@ try:
 except ImportError as e:
     logger.warning(f"Failed to load batch anything dynamic node: {e}")
 
+try:
+    from .enhanced_lambert_renderer_node import NODE_CLASS_MAPPINGS as RENDERER_MAPPINGS
+    from .enhanced_lambert_renderer_node import NODE_DISPLAY_NAME_MAPPINGS as RENDERER_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(RENDERER_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(RENDERER_DISPLAY_MAPPINGS)
+    logger.info("Loaded enhanced Lambert 3D renderer node")
+except ImportError as e:
+    logger.warning(f"Failed to load enhanced Lambert 3D renderer node: {e}")
+
 # 导出给ComfyUI
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
