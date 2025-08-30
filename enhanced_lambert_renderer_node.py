@@ -108,18 +108,19 @@ class EnhancedLambert3DRenderer:
         ])
     
     def generate_box_geometry(self, scale):
-        """Generate box geometry"""
-        w, h, d = scale
+        """Generate box geometry using standard axes: X=width, Y=height, Z=length"""
+        # 约定：scale = [width (X), height (Y), length (Z)]
+        w, h, l = scale
         
         vertices = np.array([
-            [-w/2, -h/2, -d/2],  # 0: left-bottom-back
-            [w/2, -h/2, -d/2],   # 1: right-bottom-back
-            [w/2, h/2, -d/2],    # 2: right-top-back
-            [-w/2, h/2, -d/2],   # 3: left-top-back
-            [-w/2, -h/2, d/2],   # 4: left-bottom-front
-            [w/2, -h/2, d/2],    # 5: right-bottom-front
-            [w/2, h/2, d/2],     # 6: right-top-front
-            [-w/2, h/2, d/2]     # 7: left-top-front
+            [-w/2, -h/2, -l/2],  # 0: left-bottom-back
+            [w/2, -h/2, -l/2],   # 1: right-bottom-back
+            [w/2, h/2, -l/2],    # 2: right-top-back
+            [-w/2, h/2, -l/2],   # 3: left-top-back
+            [-w/2, -h/2, l/2],   # 4: left-bottom-front
+            [w/2, -h/2, l/2],    # 5: right-bottom-front
+            [w/2, h/2, l/2],     # 6: right-top-front
+            [-w/2, h/2, l/2]     # 7: left-top-front
         ])
         
         # Define 6 faces with color info based on base color
@@ -139,7 +140,8 @@ class EnhancedLambert3DRenderer:
         """Project vertices to screen coordinates"""
         vertices_homogeneous = np.hstack([vertices, np.ones((len(vertices), 1))])
         
-        view_matrix = self.create_view_matrix(camera_pos, target_pos, [0, 0, 1])
+        # 使用Y轴为上方向，保证"height"控制垂直尺寸
+        view_matrix = self.create_view_matrix(camera_pos, target_pos, [0, 1, 0])
         projection_matrix = self.create_perspective_matrix()
         
         vertices_view = (view_matrix @ vertices_homogeneous.T).T
@@ -326,7 +328,8 @@ class EnhancedLambert3DRenderer:
                     pass  # Skip problematic polygons
         
         # Add info text
-        draw.text((10, 10), f"Enhanced Lambert 3D - {scale[0]:.1f}m×{scale[1]:.1f}m×{scale[2]:.1f}m", fill='black')
+        # 显示为 L×W×H，保持与输入名一致：length=scale[2], width=scale[0], height=scale[1]
+        draw.text((10, 10), f"Enhanced Lambert 3D - L:{scale[2]:.1f}m  W:{scale[0]:.1f}m  H:{scale[1]:.1f}m", fill='black')
         
         # Show "auto" for automatic distance, actual distance for manual
         if original_distance is None:
@@ -353,31 +356,31 @@ class Enhanced3DRenderer(ComfyNodeABC):
                     "min": 0.1, 
                     "max": 10, 
                     "step": 0.1,
-                    "tooltip": "3D盒子的宽度，单位米"
+                    "tooltip": "3D盒子的宽度 Width(X)，单位米"
                 }),
                 "height": ("FLOAT", {
                     "default": 4.0, 
                     "min": 0.1, 
                     "max": 10, 
                     "step": 0.1,
-                    "tooltip": "3D盒子的高度，单位米"
+                    "tooltip": "3D盒子的高度 Height(Y)，单位米"
                 }),
-                "depth": ("FLOAT", {
+                "length": ("FLOAT", {
                     "default": 1.5, 
                     "min": 0.1, 
                     "max": 10, 
                     "step": 0.1,
-                    "tooltip": "3D盒子的深度，单位米"
+                    "tooltip": "3D盒子的长度 Length(Z)，单位米"
                 }),
                 "camera_angle": ("FLOAT", {
-                    "default": 45.0, 
+                    "default": 30.0, 
                     "min": 0.0, 
                     "max": 360.0, 
                     "step": 1.0,
                     "tooltip": "摄像机围绕盒子的旋转角度"
                 }),
                 "camera_elevation": ("FLOAT", {
-                    "default": 25.0, 
+                    "default": 30.0, 
                     "min": -90.0, 
                     "max": 90.0, 
                     "step": 1.0,
@@ -391,7 +394,7 @@ class Enhanced3DRenderer(ComfyNodeABC):
                     "tooltip": "输出图像的宽度，单位像素"
                 }),
                 "image_height": ("INT", {
-                    "default": 600, 
+                    "default": 800, 
                     "min": 64, 
                     "max": 2048, 
                     "step": 8,
@@ -430,7 +433,7 @@ class Enhanced3DRenderer(ComfyNodeABC):
     RETURN_NAMES = ("image",)
     FUNCTION = "render_3d_box"
     
-    def render_3d_box(self, width, height, depth, camera_angle, camera_elevation, image_width, image_height, camera_distance, background_color, box_color, output_depth=False, depth_gamma=1.0):
+    def render_3d_box(self, width, height, length, camera_angle, camera_elevation, image_width, image_height, camera_distance, background_color, box_color, output_depth=False, depth_gamma=1.0):
         """Render the 3D box and return as ComfyUI image format"""
         
         if not HAS_TORCH:
@@ -440,8 +443,8 @@ class Enhanced3DRenderer(ComfyNodeABC):
         renderer = EnhancedLambert3DRenderer(width=image_width, height=image_height, 
                                            background_color=background_color, box_color=box_color)
         
-        # Render the 3D model
-        scale = [width, height, depth]
+        # Render the 3D model（scale: width=X, height=Y, length=Z）
+        scale = [width, height, length]
         pil_image = renderer.render_3d_model(
             scale,
             camera_angle,
