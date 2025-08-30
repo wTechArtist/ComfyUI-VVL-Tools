@@ -75,6 +75,145 @@ class EnhancedLambert3DRenderer:
         base_distance = radius / max(1e-6, math.tan(fov_rad / 2.0))
         margin = 1.2  # 少量边距，避免充满导致裁剪
         return base_distance * margin
+
+    def get_distance_for_coverage(self, scale, camera_angle_deg, camera_elevation_deg, target_coverage):
+        """根据目标画面占比(0-1)通过二分搜索求解相机距离。
+
+        说明：使用简单的三角形光栅化将可见面填充到掩膜中，
+        计算mask中的像素比例即为覆盖率，随距离单调递减，
+        因此可用二分搜索求解到目标占比附近的距离。
+        """
+        # 预生成几何
+        vertices, _ = self.generate_box_geometry(scale)
+
+        angle_rad = math.radians(camera_angle_deg)
+        elevation_rad = math.radians(camera_elevation_deg)
+
+        # 工具：多边形面积
+        def polygon_area(poly):
+            if len(poly) < 3:
+                return 0.0
+            area = 0.0
+            for i in range(len(poly)):
+                x1, y1 = poly[i]
+                x2, y2 = poly[(i + 1) % len(poly)]
+                area += x1 * y2 - x2 * y1
+            return abs(area) * 0.5
+
+        # 工具：Sutherland–Hodgman 裁剪到矩形 [0,w]x[0,h]
+        def clip_polygon_to_rect(poly, w, h):
+            def clip_edge(points, inside_fn, intersect_fn):
+                if not points:
+                    return []
+                output = []
+                prev = points[-1]
+                prev_inside = inside_fn(prev)
+                for curr in points:
+                    curr_inside = inside_fn(curr)
+                    if curr_inside:
+                        if not prev_inside:
+                            output.append(intersect_fn(prev, curr))
+                        output.append(curr)
+                    elif prev_inside:
+                        output.append(intersect_fn(prev, curr))
+                    prev = curr
+                    prev_inside = curr_inside
+                return output
+
+            poly2 = clip_edge(poly, lambda p: p[0] >= 0.0, lambda a, b: (0.0, a[1] + (b[1] - a[1]) * (0.0 - a[0]) / (b[0] - a[0] + 1e-12)))
+            poly3 = clip_edge(poly2, lambda p: p[0] <= w,   lambda a, b: (w,   a[1] + (b[1] - a[1]) * (w   - a[0]) / (b[0] - a[0] + 1e-12)))
+            poly4 = clip_edge(poly3, lambda p: p[1] >= 0.0, lambda a, b: (a[0] + (b[0] - a[0]) * (0.0 - a[1]) / (b[1] - a[1] + 1e-12), 0.0))
+            poly5 = clip_edge(poly4, lambda p: p[1] <= h,   lambda a, b: (a[0] + (b[0] - a[0]) * (h   - a[1]) / (b[1] - a[1] + 1e-12), h))
+            return poly5
+
+        # 工具：二维凸包（Andrew Monotone Chain）
+        def convex_hull(points):
+            pts = sorted(points)
+            if len(pts) <= 1:
+                return pts
+            def cross(o, a, b):
+                return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+            lower = []
+            for p in pts:
+                while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+                    lower.pop()
+                lower.append(p)
+            upper = []
+            for p in reversed(pts):
+                while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+                    upper.pop()
+                upper.append(p)
+            return lower[:-1] + upper[:-1]
+
+        # 局部函数：给定距离计算覆盖率（凸包面积法）
+        def coverage_at_distance(distance):
+            camera_pos = [
+                distance * math.cos(elevation_rad) * math.cos(angle_rad),
+                distance * math.cos(elevation_rad) * math.sin(angle_rad),
+                distance * math.sin(elevation_rad),
+            ]
+            screen_vertices, _ = self.project_vertices(vertices, camera_pos, [0, 0, 0])
+            pts = [(float(x), float(y)) for x, y in screen_vertices]
+            hull = convex_hull(pts)
+            if not hull:
+                return 0.0
+            clipped = clip_polygon_to_rect(hull, float(self.width), float(self.height))
+            if not clipped:
+                return 0.0
+            area = polygon_area(clipped)
+            return max(0.0, min(1.0, area / float(self.width * self.height)))
+
+        # 以旧的距离计算为参考，扩展出搜索区间
+        base_distance = max(1e-3, self.calculate_camera_distance(scale))
+        # 初始覆盖率
+        cov_base = coverage_at_distance(base_distance)
+
+        # 设定合理上下界并保证单调区间覆盖目标
+        d_lo = base_distance
+        d_hi = base_distance
+        cov_lo = cov_base
+        cov_hi = cov_base
+
+        # 如果当前覆盖率大于目标，需要增大距离(缩小投影)
+        if cov_base > target_coverage:
+            for _ in range(20):
+                d_hi *= 1.8
+                cov_hi = coverage_at_distance(d_hi)
+                if cov_hi <= target_coverage:
+                    break
+            d_lo = base_distance
+            cov_lo = cov_base
+        else:
+            # 如果当前覆盖率小于目标，需要减小距离(放大投影)
+            for _ in range(20):
+                d_lo *= 0.55
+                # 避免过近导致数值不稳定
+                d_lo = max(d_lo, 1e-3)
+                cov_lo = coverage_at_distance(d_lo)
+                if cov_lo >= target_coverage:
+                    break
+            d_hi = base_distance
+            cov_hi = cov_base
+
+        # 若仍未跨越目标，返回边界中更接近目标的一端
+        if not ((cov_lo >= target_coverage and cov_hi <= target_coverage) or (cov_hi >= target_coverage and cov_lo <= target_coverage)):
+            # 选择使覆盖率更接近目标的距离
+            if abs(cov_lo - target_coverage) <= abs(cov_hi - target_coverage):
+                return d_lo
+            return d_hi
+
+        # 二分搜索以逼近目标覆盖率
+        for _ in range(18):
+            d_mid = 0.5 * (d_lo + d_hi)
+            cov_mid = coverage_at_distance(d_mid)
+            if cov_mid > target_coverage:
+                d_lo, cov_lo = d_mid, cov_mid  # 覆盖偏大，增大距离
+            else:
+                d_hi, cov_hi = d_mid, cov_mid  # 覆盖偏小，减小距离
+        # 选择更接近目标的一侧
+        if abs(cov_lo - target_coverage) <= abs(cov_hi - target_coverage):
+            return d_lo
+        return d_hi
         
     def create_perspective_matrix(self):
         """Create perspective projection matrix"""
@@ -183,34 +322,31 @@ class EnhancedLambert3DRenderer:
         
         return np.dot(face_normal, view_direction) > 0
     
-    def render_3d_model(self, scale, camera_angle=45, camera_elevation=25, camera_distance=0.0, original_distance=None, output_depth=False, depth_gamma=1.0):
-        """Render enhanced 3D model and return PIL Image
-        
-        If output_depth is True, returns a white-near/black-far depth visualization
-        computed with a simple Z-buffer rasterizer.
+    def render_3d_model(self, scale, camera_angle=45, camera_elevation=25, coverage_percent=30.0, output_depth=False, depth_gamma=1.0):
+        """Render enhanced 3D model并返回PIL图像。
+
+        参数说明：
+        - coverage_percent: 盒子在最终图像中所占像素的百分比(0-100)。
+        - output_depth: 若为True，则输出白近黑远的深度可视化。
         """
         # Generate geometry
         vertices, faces = self.generate_box_geometry(scale)
-        
-        # Calculate camera position
-        if camera_distance <= 0:
-            camera_distance = self.calculate_camera_distance(scale)
-        else:
-            # Warn if distance is too close for the object size
-            min_recommended_distance = max(scale) * 1.5
-            if camera_distance < min_recommended_distance:
-                print(f"Warning: Camera distance {camera_distance:.1f}m might be too close for box size. Recommend >= {min_recommended_distance:.1f}m")
+
+        # 依据占比自动解算相机距离
+        target_coverage = max(0.001, min(0.99, float(coverage_percent) / 100.0))
+        camera_distance = self.get_distance_for_coverage(scale, camera_angle, camera_elevation, target_coverage)
+
         angle_rad = math.radians(camera_angle)
         elevation_rad = math.radians(camera_elevation)
-        
+
         camera_pos = [
             camera_distance * math.cos(elevation_rad) * math.cos(angle_rad),
             camera_distance * math.cos(elevation_rad) * math.sin(angle_rad),
             camera_distance * math.sin(elevation_rad)
         ]
-        
+
         target_pos = [0, 0, 0]
-        
+
         # Project vertices
         screen_vertices, depths = self.project_vertices(vertices, camera_pos, target_pos)
 
@@ -331,12 +467,8 @@ class EnhancedLambert3DRenderer:
         # 显示为 L×W×H，保持与输入名一致：length=scale[2], width=scale[0], height=scale[1]
         draw.text((10, 10), f"Enhanced Lambert 3D - L:{scale[2]:.1f}m  W:{scale[0]:.1f}m  H:{scale[1]:.1f}m", fill='black')
         
-        # Show "auto" for automatic distance, actual distance for manual
-        if original_distance is None:
-            original_distance = camera_distance
-            
-        distance_text = "auto" if original_distance <= 0 else f"{original_distance:.1f}m"
-        draw.text((10, 30), f"Camera: {camera_angle}°/{camera_elevation}° - {distance_text}", fill='black')
+        # 显示相机角度与占比
+        draw.text((10, 30), f"Camera: {camera_angle}°/{camera_elevation}° - Coverage: {coverage_percent:.0f}%", fill='black')
         
         return img
 
@@ -352,60 +484,60 @@ class Enhanced3DRenderer(ComfyNodeABC):
         return {
             "required": {
                 "width": ("FLOAT", {
-                    "default": 2.0, 
+                    "default": 0.5, 
                     "min": 0.1, 
                     "max": 10, 
                     "step": 0.1,
                     "tooltip": "3D盒子的宽度 Width(X)，单位米"
                 }),
                 "height": ("FLOAT", {
-                    "default": 4.0, 
+                    "default": 0.75, 
                     "min": 0.1, 
                     "max": 10, 
                     "step": 0.1,
                     "tooltip": "3D盒子的高度 Height(Y)，单位米"
                 }),
                 "length": ("FLOAT", {
-                    "default": 1.5, 
+                    "default": 0.5, 
                     "min": 0.1, 
                     "max": 10, 
                     "step": 0.1,
                     "tooltip": "3D盒子的长度 Length(Z)，单位米"
                 }),
                 "camera_angle": ("FLOAT", {
-                    "default": 30.0, 
+                    "default": 25.0, 
                     "min": 0.0, 
                     "max": 360.0, 
                     "step": 1.0,
                     "tooltip": "摄像机围绕盒子的旋转角度"
                 }),
                 "camera_elevation": ("FLOAT", {
-                    "default": 30.0, 
+                    "default": 25.0, 
                     "min": -90.0, 
                     "max": 90.0, 
                     "step": 1.0,
                     "tooltip": "摄像机的俯仰角度"
                 }),
                 "image_width": ("INT", {
-                    "default": 800, 
+                    "default": 1024, 
                     "min": 64, 
                     "max": 2048, 
                     "step": 8,
                     "tooltip": "输出图像的宽度，单位像素"
                 }),
                 "image_height": ("INT", {
-                    "default": 800, 
+                    "default": 1024, 
                     "min": 64, 
                     "max": 2048, 
                     "step": 8,
                     "tooltip": "输出图像的高度，单位像素"
                 }),
-                "camera_distance": ("FLOAT", {
-                    "default": 0.0, 
-                    "min": 0.0, 
-                    "max": 50.0, 
+                "box_coverage_percent": ("FLOAT", {
+                    "default": 20.0,
+                    "min": 1.0,
+                    "max": 95.0,
                     "step": 0.5,
-                    "tooltip": "摄像机距离，单位米 (0 = 自动计算，推荐5-20米)"
+                    "tooltip": "盒子占画面像素的百分比(1-95%)，自动解算相机距离"
                 }),
                 "background_color": ("STRING", {
                     "default": "#000000",
@@ -416,7 +548,7 @@ class Enhanced3DRenderer(ComfyNodeABC):
                     "tooltip": "盒子主要颜色，十六进制格式如 #C8C8C8"
                 }),
                 "output_depth": ("BOOLEAN", {
-                    "default": False,
+                    "default": True,
                     "tooltip": "勾选后输出白近黑远的深度图"
                 }),
                 "depth_gamma": ("FLOAT", {
@@ -433,7 +565,7 @@ class Enhanced3DRenderer(ComfyNodeABC):
     RETURN_NAMES = ("image",)
     FUNCTION = "render_3d_box"
     
-    def render_3d_box(self, width, height, length, camera_angle, camera_elevation, image_width, image_height, camera_distance, background_color, box_color, output_depth=False, depth_gamma=1.0):
+    def render_3d_box(self, width, height, length, camera_angle, camera_elevation, image_width, image_height, box_coverage_percent, background_color, box_color, output_depth=False, depth_gamma=1.0):
         """Render the 3D box and return as ComfyUI image format"""
         
         if not HAS_TORCH:
@@ -449,8 +581,7 @@ class Enhanced3DRenderer(ComfyNodeABC):
             scale,
             camera_angle,
             camera_elevation,
-            camera_distance,
-            original_distance=camera_distance,
+            coverage_percent=box_coverage_percent,
             output_depth=output_depth,
             depth_gamma=depth_gamma,
         )
