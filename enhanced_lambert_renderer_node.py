@@ -63,22 +63,18 @@ class EnhancedLambert3DRenderer:
             return np.array([0.8, 0.8, 0.8])
         
     def calculate_camera_distance(self, scale):
-        """Calculate camera distance based on box size with adaptive scaling"""
-        max_dimension = max(scale)
-        
-        # Use adaptive scaling for better viewing experience
-        if max_dimension <= 2.0:
-            # For small objects (≤2m): use 2.5x multiplier
-            return max_dimension * 2.5
-        elif max_dimension <= 5.0:
-            # For medium objects (2-5m): use 2.2x multiplier  
-            return max_dimension * 2.2
-        elif max_dimension <= 8.0:
-            # For large objects (5-8m): use 1.8x multiplier + small offset
-            return max_dimension * 1.8 + 2.0
-        else:
-            # For very large objects (>8m): use 1.6x multiplier + larger offset
-            return max_dimension * 1.6 + 4.0
+        """根据包围球与垂直视场计算相机距离，使画面更充满。
+
+        公式：d = r / tan(fov/2) * margin，其中 r 为包围球半径。
+        该方法比先前的比例法更稳健，并在默认尺寸下约为 5m。
+        """
+        w, h, d = scale
+        # 包围球半径
+        radius = 0.5 * math.sqrt(w * w + h * h + d * d)
+        fov_rad = math.radians(self.fov)
+        base_distance = radius / max(1e-6, math.tan(fov_rad / 2.0))
+        margin = 1.2  # 少量边距，避免充满导致裁剪
+        return base_distance * margin
         
     def create_perspective_matrix(self):
         """Create perspective projection matrix"""
