@@ -60,5 +60,23 @@ try:
 except ImportError as e:
     logger.warning(f"Failed to load enhanced Lambert 3D renderer node: {e}")
 
+try:
+    from .tensor_list_preview import NODE_CLASS_MAPPINGS as TENSOR_PREVIEW_MAPPINGS
+    from .tensor_list_preview import NODE_DISPLAY_NAME_MAPPINGS as TENSOR_PREVIEW_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(TENSOR_PREVIEW_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(TENSOR_PREVIEW_DISPLAY_MAPPINGS)
+    logger.info("Loaded tensor list preview node")
+except ImportError as e:
+    logger.warning(f"Failed to load tensor list preview node: {e}")
+
+try:
+    from .nodes_json_object_utils import NODE_CLASS_MAPPINGS as JSON_UTILS_MAPPINGS
+    from .nodes_json_object_utils import NODE_DISPLAY_NAME_MAPPINGS as JSON_UTILS_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(JSON_UTILS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(JSON_UTILS_DISPLAY_MAPPINGS)
+    logger.info("Loaded JSON object utils nodes")
+except ImportError as e:
+    logger.warning(f"Failed to load JSON object utils nodes: {e}")
+
 # 导出给ComfyUI
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
