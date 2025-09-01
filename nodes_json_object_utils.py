@@ -750,7 +750,7 @@ class JsonRotationScaleAdjuster:
             },
             "optional": {
                 "rotation_order": (["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"], {
-                    "default": "YXZ",
+                    "default": "YZX",
                     "tooltip": "旋转值的顺序重排\n• XYZ: [x, y, z] - 默认顺序\n• XZY: [x, z, y] - Y和Z互换\n• YXZ: [y, x, z] - X和Y互换\n• YZX: [y, z, x] - 循环右移\n• ZXY: [z, x, y] - 循环左移\n• ZYX: [z, y, x] - X和Z互换\n注意：重排在偏移量计算之前执行"
                 }),
                 "rotation_x_offset": (IO.FLOAT, {
