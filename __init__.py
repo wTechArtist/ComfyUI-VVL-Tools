@@ -78,5 +78,14 @@ try:
 except ImportError as e:
     logger.warning(f"Failed to load JSON object utils nodes: {e}")
 
+try:
+    from .room_generator import NODE_CLASS_MAPPINGS as ROOM_GENERATOR_MAPPINGS
+    from .room_generator import NODE_DISPLAY_NAME_MAPPINGS as ROOM_GENERATOR_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(ROOM_GENERATOR_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(ROOM_GENERATOR_DISPLAY_MAPPINGS)
+    logger.info("Loaded room generator nodes")
+except ImportError as e:
+    logger.warning(f"Failed to load room generator nodes: {e}")
+
 # 导出给ComfyUI
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
