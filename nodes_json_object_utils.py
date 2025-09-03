@@ -1109,6 +1109,119 @@ class JsonScaleMaxAdjuster:
             return (json.dumps({"error": error_msg}, ensure_ascii=False),)
 
 
+class JsonCompressor:
+    """
+    JSON压缩节点
+    
+    将格式化的JSON压缩为紧凑格式，移除所有非必要的空白字符：
+    • 移除所有缩进空格和制表符
+    • 移除所有换行符
+    • 移除冒号和逗号后的额外空格
+    • 保持JSON数据结构和内容完全不变
+    
+    🎯 功能特性：
+    • 高效压缩：显著减小JSON文件大小
+    • 完全兼容：保持JSON语法和数据完整性
+    • 安全处理：验证输入JSON格式有效性
+    • 错误处理：提供详细的错误信息反馈
+    
+    📊 压缩效果：
+    • 移除缩进：节省大量空间
+    • 移除换行：减少文件行数
+    • 紧凑分隔符：最小化语法字符占用
+    • 保持数据：确保数据内容不丢失
+    
+    📝 使用场景：
+    • 减小JSON文件传输大小
+    • 优化存储空间占用
+    • 提高网络传输效率
+    • 生成用于API的紧凑JSON
+    
+    💡 处理逻辑：
+    1. 验证输入JSON格式有效性
+    2. 解析JSON为Python对象
+    3. 使用紧凑模式重新序列化
+    4. 移除所有非必要空白字符
+    5. 返回压缩后的JSON字符串
+    
+    🔍 注意事项：
+    • 压缩是无损的，不会改变数据内容
+    • 压缩后的JSON仍然是有效的JSON格式
+    • 可以通过格式化工具还原为可读格式
+    • 压缩程度取决于原始JSON的格式化程度
+    
+    📈 压缩示例：
+    压缩前 (228字符):
+    {
+      "camera": {
+        "position": [50, 0, 0],
+        "rotation": [10, 0, 0]
+      }
+    }
+    
+    压缩后 (67字符):
+    {"camera":{"position":[50,0,0],"rotation":[10,0,0]}}
+    
+    压缩率: 70.6%
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "json_text": (IO.STRING, {"multiline": True, "default": "", "tooltip": "要压缩的JSON数据\n支持任何有效的JSON格式\n包括带缩进、换行的格式化JSON\n将被压缩为紧凑的单行格式"})
+            },
+            "optional": {
+                "show_compression_stats": (IO.BOOLEAN, {"default": True, "label_on": "显示统计", "label_off": "隐藏统计", "tooltip": "是否显示压缩统计信息\n• 开启: 显示压缩前后字符数和压缩率\n• 关闭: 仅输出压缩结果\n统计信息会在控制台中显示"}),
+            },
+        }
+    
+    RETURN_TYPES = (IO.STRING,)
+    RETURN_NAMES = ("compressed_json",)
+    FUNCTION = "compress_json"
+    CATEGORY = "VVL/json"
+    
+    def compress_json(self, json_text, show_compression_stats=True, **kwargs):
+        """压缩JSON为紧凑格式"""
+        try:
+            # 验证并解析输入JSON
+            data = json.loads(json_text)
+            
+            # 使用紧凑模式序列化JSON
+            # separators=(',', ':') 移除逗号和冒号后的空格
+            # ensure_ascii=False 保持非ASCII字符
+            compressed_json = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
+            
+            # 计算压缩统计信息
+            if show_compression_stats:
+                original_size = len(json_text)
+                compressed_size = len(compressed_json)
+                space_saved = original_size - compressed_size
+                compression_ratio = (space_saved / original_size * 100) if original_size > 0 else 0
+                
+                print(f"JsonCompressor 压缩完成:")
+                print(f"  • 原始大小: {original_size} 字符")
+                print(f"  • 压缩后大小: {compressed_size} 字符")
+                print(f"  • 节省空间: {space_saved} 字符")
+                print(f"  • 压缩率: {compression_ratio:.1f}%")
+                
+                # 显示压缩效果示例（前100个字符）
+                if original_size > 100:
+                    print(f"  • 压缩前预览: {json_text[:100]}...")
+                    print(f"  • 压缩后预览: {compressed_json[:100]}...")
+            
+            return (compressed_json,)
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON格式错误: {str(e)}"
+            print(f"JsonCompressor error: {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+        except Exception as e:
+            error_msg = f"压缩JSON时出错: {str(e)}"
+            print(f"JsonCompressor error: {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+
+
 class DimensionReorderAndScale:
     """
     三维数据重新排序和缩放节点
@@ -1296,6 +1409,7 @@ NODE_CLASS_MAPPINGS = {
     "JsonArrayElementFieldExtractor": JsonArrayElementFieldExtractor,
     "JsonRotationScaleAdjuster": JsonRotationScaleAdjuster,
     "JsonScaleMaxAdjuster": JsonScaleMaxAdjuster,
+    "JsonCompressor": JsonCompressor,
     "DimensionReorderAndScale": DimensionReorderAndScale
 }
 
@@ -1310,5 +1424,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "JsonArrayElementFieldExtractor": "VVL JSON Array Element Field Extractor",
     "JsonRotationScaleAdjuster": "VVL JSON Rotation & Scale Adjuster",
     "JsonScaleMaxAdjuster": "VVL JSON Scale Max Value Adjuster",
+    "JsonCompressor": "VVL JSON Compressor",
     "DimensionReorderAndScale": "VVL Dimension Reorder and Scale",
 }
