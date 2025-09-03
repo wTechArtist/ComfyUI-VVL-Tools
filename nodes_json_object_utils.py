@@ -932,6 +932,183 @@ class JsonRotationScaleAdjuster:
             return (json.dumps({"error": error_msg}, ensure_ascii=False),)
 
 
+class JsonScaleMaxAdjuster:
+    """
+    JSON对象逐个缩放维度选择性调整器
+    
+    对JSON数据中前N个对象进行逐个处理，在每个对象内部找出scale的最小维度并保护，调整其他维度：
+    • 逐个分析每个对象的scale值（X、Y、Z三个维度）
+    • 在每个对象内部找出最小的维度值
+    • 只对该对象内其他两个较大的维度进行增量调整
+    • 保持每个对象最小维度不变，维持原有数据结构
+    
+    🎯 功能特性：
+    • 对象范围：可设置处理前几个对象（默认前6个）
+    • 逐对象处理：每个对象独立分析和调整
+    • 维度保护：保护每个对象的最小维度不被修改
+    • 安全处理：自动跳过没有scale字段或格式错误的对象
+    
+    ⚙️ 参数说明：
+    • object_count: 处理前几个对象（默认6个）
+    • max_value_increment: 给非最小维度增加的数值
+    
+    📝 使用场景：
+    • 保持对象最细维度不变，拉伸其他维度
+    • 创建非均匀缩放效果
+    • 调整对象比例，突出长宽维度
+    • 保护对象厚度或高度等关键维度
+    
+    💡 处理逻辑：
+    1. 遍历前N个对象的scale字段
+    2. 对每个对象分别处理：
+       a. 获取X、Y、Z三个维度值
+       b. 找出当前对象内的最小维度值
+       c. 对其他两个维度进行增量调整
+       d. 保持最小维度不变
+    3. 保持JSON结构和其他数据不变
+    
+    🔍 注意事项：
+    • 只处理包含有效scale字段的对象
+    • scale字段必须是长度≥3的数组
+    • 如果前N个对象不足，则处理实际存在的对象
+    • 增量可以为负数（减少非最小维度）
+    • 如果对象内三个维度相等，则全部调整
+    
+    📊 处理示例：
+    对象scale=[1.0, 0.5, 0.8], 增量=0.1
+    → 最小值0.5保持不变
+    → 调整后: [1.1, 0.5, 0.9]
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "json_text": (IO.STRING, {"multiline": True, "default": "", "tooltip": "包含objects数组的JSON数据\n将处理前N个对象的scale值\n找出最大值并进行调整"})
+            },
+            "optional": {
+                "object_count": (IO.INT, {
+                    "default": 6, 
+                    "min": 1, 
+                    "max": 100,
+                    "tooltip": "处理前几个对象\n• 默认: 6个对象\n• 范围: 1到100\n• 如果对象不足则处理所有可用对象\n• 逐个处理每个对象的scale维度"
+                }),
+                "max_value_increment": (IO.FLOAT, {
+                    "default": 0.1, 
+                    "min": -1000.0, 
+                    "max": 1000.0, 
+                    "step": 0.001,
+                    "tooltip": "非最小维度增量\n• 正数: 增加每个对象内除最小维度外的值\n• 负数: 减少每个对象内除最小维度外的值\n• 0: 不进行调整\n• 示例: 0.1表示给非最小维度都加0.1\n• 示例: -0.05表示给非最小维度都减0.05\n• 每个对象的最小维度始终保持不变"
+                }),
+            },
+        }
+    
+    RETURN_TYPES = (IO.STRING,)
+    RETURN_NAMES = ("adjusted_json",)
+    FUNCTION = "adjust_scale_max_value"
+    CATEGORY = "VVL/json"
+    
+    def adjust_scale_max_value(self, json_text, object_count=6, max_value_increment=0.1, **kwargs):
+        """调整前N个对象中scale值的最大值"""
+        try:
+            # 解析输入JSON
+            data = json.loads(json_text)
+            
+            # 检查是否有objects字段
+            if 'objects' not in data or not isinstance(data['objects'], list):
+                print("JsonScaleMaxAdjuster: 未找到有效的objects数组")
+                return (json_text,)
+            
+            objects = data['objects']
+            
+            # 确定实际处理的对象数量
+            actual_count = min(object_count, len(objects))
+            if actual_count == 0:
+                print("JsonScaleMaxAdjuster: 没有可处理的对象")
+                return (json_text,)
+            
+            # 逐个对象处理scale值
+            valid_objects = 0
+            total_adjusted = 0
+            total_scale_values = 0
+            
+            for i in range(actual_count):
+                obj = objects[i]
+                if not isinstance(obj, dict):
+                    continue
+                
+                if 'scale' in obj:
+                    scale = obj['scale']
+                    
+                    # 检查scale是否为有效的列表格式
+                    if isinstance(scale, list) and len(scale) >= 3:
+                        try:
+                            # 获取当前对象的X、Y、Z三个维度的值
+                            x_val = float(scale[0])
+                            y_val = float(scale[1])
+                            z_val = float(scale[2])
+                            
+                            # 在当前对象内找出最小值
+                            min_val_in_obj = min(x_val, y_val, z_val)
+                            
+                            # 对每个维度进行处理：如果不是最小值则调整
+                            obj_adjusted = 0
+                            if x_val != min_val_in_obj:
+                                scale[0] = x_val + max_value_increment
+                                obj_adjusted += 1
+                            if y_val != min_val_in_obj:
+                                scale[1] = y_val + max_value_increment
+                                obj_adjusted += 1
+                            if z_val != min_val_in_obj:
+                                scale[2] = z_val + max_value_increment
+                                obj_adjusted += 1
+                            
+                            # 特殊情况：如果三个值都相等，则全部调整
+                            if obj_adjusted == 0 and x_val == y_val == z_val:
+                                scale[0] = x_val + max_value_increment
+                                scale[1] = y_val + max_value_increment
+                                scale[2] = z_val + max_value_increment
+                                obj_adjusted = 3
+                            
+                            total_adjusted += obj_adjusted
+                            total_scale_values += 3
+                            valid_objects += 1
+                            
+                            print(f"  对象[{i}]: scale=[{x_val:.3f}, {y_val:.3f}, {z_val:.3f}], 最小值={min_val_in_obj:.3f}, 调整了{obj_adjusted}个维度")
+                            
+                        except (ValueError, TypeError) as e:
+                            print(f"JsonScaleMaxAdjuster: 对象 {i} 的scale值转换失败: {e}")
+                    else:
+                        print(f"JsonScaleMaxAdjuster: 对象 {i} 的scale格式无效: {scale}")
+            
+            if valid_objects == 0:
+                print("JsonScaleMaxAdjuster: 未找到有效的scale值")
+                return (json_text,)
+            
+            # 生成处理后的JSON
+            adjusted_json = json.dumps(data, ensure_ascii=False, indent=2)
+            
+            # 输出处理统计信息
+            print(f"JsonScaleMaxAdjuster 处理完成:")
+            print(f"  • 处理对象范围: 前 {actual_count} 个对象")
+            print(f"  • 有效对象数量: {valid_objects} 个")
+            print(f"  • 总scale维度: {total_scale_values} 个")
+            print(f"  • 调整的维度数: {total_adjusted} 个")
+            print(f"  • 增量调整: +{max_value_increment}")
+            print(f"  • 处理策略: 每个对象内部排除最小值，调整其他维度")
+            
+            return (adjusted_json,)
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON解析错误: {str(e)}"
+            print(f"JsonScaleMaxAdjuster error: {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+        except Exception as e:
+            error_msg = f"处理scale最大值时出错: {str(e)}"
+            print(f"JsonScaleMaxAdjuster error: {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+
+
 class DimensionReorderAndScale:
     """
     三维数据重新排序和缩放节点
@@ -1118,6 +1295,7 @@ NODE_CLASS_MAPPINGS = {
     "IndexUrlPairDeduplicator": IndexUrlPairDeduplicator,
     "JsonArrayElementFieldExtractor": JsonArrayElementFieldExtractor,
     "JsonRotationScaleAdjuster": JsonRotationScaleAdjuster,
+    "JsonScaleMaxAdjuster": JsonScaleMaxAdjuster,
     "DimensionReorderAndScale": DimensionReorderAndScale
 }
 
@@ -1131,5 +1309,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IndexUrlPairDeduplicator": "VVL Index-URL Pair Deduplicator",
     "JsonArrayElementFieldExtractor": "VVL JSON Array Element Field Extractor",
     "JsonRotationScaleAdjuster": "VVL JSON Rotation & Scale Adjuster",
+    "JsonScaleMaxAdjuster": "VVL JSON Scale Max Value Adjuster",
     "DimensionReorderAndScale": "VVL Dimension Reorder and Scale",
 }
