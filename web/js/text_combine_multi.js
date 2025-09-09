@@ -84,57 +84,13 @@ app.registerExtension({
 				}
 
 				nodeType.prototype.onNodeCreated = function () {
-					// 重建 text_* 输入端口：仅移除多余的，添加缺失的，保留已连接的
-					const rebuildTextInputs = (targetCount) => {
-						// 检查节点是否已经添加到图形中
-						if (!this.graph) {
-							console.debug("[TextCombineMulti] Node not added to graph yet, skipping input rebuild");
-							return;
-						}
-						
-						if (!this.inputs) this.inputs = [];
-						// 记录现有的 text_* 名称集合
-						const existing = new Set();
-						for (let i = 0; i < this.inputs.length; i++) {
-							const input = this.inputs[i];
-							if (input && input.name && input.name.startsWith("text_")) {
-								const num = parseInt(input.name.replace("text_", ""));
-								existing.add(num);
-							}
-						}
-						// 从后往前移除多余的 text_* 输入（> targetCount）
-						for (let i = this.inputs.length - 1; i >= 0; i--) {
-							const input = this.inputs[i];
-							if (input && input.name && input.name.startsWith("text_")) {
-								const num = parseInt(input.name.replace("text_", ""));
-								if (num > targetCount) {
-									try {
-										this.removeInput(i);
-										existing.delete(num);
-									} catch (e) {
-										console.warn("[TextCombineMulti] Failed to remove input:", e);
-									}
-								}
-							}
-						}
-						// 添加缺失的 1..targetCount
-						for (let i = 1; i <= targetCount; i++) {
-							if (!existing.has(i)) {
-								try {
-									this.addInput(`text_${i}`, "STRING");
-								} catch (e) {
-									console.warn("[TextCombineMulti] Failed to add input:", e);
-								}
-							}
-						}
-					};
-
-					// 初始化时按 inputcount 重建输入
+					// 简单的widget管理，不触碰输入端口
 					const applyCount = (count) => {
-						try { console.debug("[TextCombineMulti] applyCount", count, this.id); } catch(e) {}
-						rebuildTextInputs(count);
+						console.log("[TextCombineMulti] applyCount", count, this.id);
+						// 只管理widgets
 						removeExtraTextWidgets(this, count);
 						ensureTextWidgets(this, count);
+						// 让节点重新计算大小
 						this.setSize?.(this.computeSize?.());
 						this.setDirtyCanvas?.(true, true);
 					};
@@ -173,14 +129,14 @@ app.registerExtension({
 						};
 					}
 
-					// 确保在添加到画布后再次应用（有些前端会重建UI）
+					// 节点添加到画布后应用配置
 					const onAdded = nodeType.prototype.onAdded;
 					nodeType.prototype.onAdded = function() {
 						if (onAdded) onAdded.apply(this, arguments);
 						// 节点已添加到图形，安全地应用配置
 						const w = this.widgets?.find(w => w.name === "inputcount");
 						if (w) {
-							console.debug("[TextCombineMulti] Node added to graph, applying count:", w.value);
+							console.log("[TextCombineMulti] Node added to graph, applying count:", w.value);
 							setTimeout(() => applyCount(w.value), 0);
 						}
 					};
@@ -199,26 +155,7 @@ app.registerExtension({
 						}
 					};
 
-					// 连接变化时也应用（有些前端在连接变化时会刷新端口）
-					const onConnectionsChange = nodeType.prototype.onConnectionsChange;
-					nodeType.prototype.onConnectionsChange = function(type, slot, isConnected, linkInfo, ioSlot) {
-						if (onConnectionsChange) onConnectionsChange.apply(this, arguments);
-						// 只有在节点已添加到图形时才处理
-						if (this.graph) {
-							const w = this.widgets?.find(w => w.name === "inputcount");
-							if (w) setTimeout(() => applyCount(w.value), 0);
-						}
-					};
-
-					const onConnectionsChainChange = nodeType.prototype.onConnectionsChainChange;
-					nodeType.prototype.onConnectionsChainChange = function() {
-						if (onConnectionsChainChange) onConnectionsChainChange.apply(this, arguments);
-						// 只有在节点已添加到图形时才处理
-						if (this.graph) {
-							const w = this.widgets?.find(w => w.name === "inputcount");
-							if (w) setTimeout(() => applyCount(w.value), 0);
-						}
-					};
+					// 移除连接变化时的重建逻辑，让ComfyUI自然处理
 
 					// 序列化/反序列化保存数量，便于恢复
 					const onSerialize = nodeType.prototype.onSerialize;
