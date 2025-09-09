@@ -547,8 +547,131 @@ class VVLForLoopEndAsync:
             if is_link(val):
                 src = dynprompt.get_node(val[0])
                 ct = src.get("class_type", "")
+                
+                # VVL_Load_Text_Batch: 文本批量加载节点 (向后兼容处理)
+                if ct == "VVL_Load_Text_Batch":
+                    logger.debug(f"[VVL] _resolve_constant_string: 检测到 VVL_Load_Text_Batch 节点")
+                    try:
+                        # 尝试直接模拟执行该节点获取文本内容
+                        inputs = src.get("inputs", {})
+                        path = str(inputs.get("path", ""))
+                        pattern = str(inputs.get("pattern", "*.txt"))
+                        mode = str(inputs.get("mode", "single_file"))
+                        encoding = str(inputs.get("encoding", "utf-8"))
+                        filename_only = str(inputs.get("filename_only", "false"))
+                        skip_empty = str(inputs.get("skip_empty", "true"))
+                        
+                        # 解析index参数，支持link输入
+                        index_input = inputs.get("index", 0)
+                        if is_link(index_input):
+                            # 如果index是link，尝试递归解析
+                            resolved_index = self._resolve_int_input(dynprompt, index_input)
+                            index = resolved_index if isinstance(resolved_index, int) else 0
+                        else:
+                            index = int(index_input) if isinstance(index_input, (int, str)) else 0
+                        
+                        # 解析seed参数，支持link输入
+                        seed_input = inputs.get("seed", 0)
+                        if is_link(seed_input):
+                            resolved_seed = self._resolve_int_input(dynprompt, seed_input)
+                            seed = resolved_seed if isinstance(resolved_seed, int) else 0
+                        else:
+                            seed = int(seed_input) if isinstance(seed_input, (int, str)) else 0
+                        
+                        logger.debug(f"[VVL] _resolve_constant_string: VVL_Load_Text_Batch 参数 - path={path}, pattern={pattern}, mode={mode}, index={index}, seed={seed}")
+                        
+                        # 安全地导入并实例化VVL_Load_Text_Batch节点
+                        VVL_Load_Text_Batch = None
+                        try:
+                            # 尝试从当前模块导入
+                            from .batch_text_loader import VVL_Load_Text_Batch as LoaderClass
+                            VVL_Load_Text_Batch = LoaderClass
+                        except ImportError:
+                            try:
+                                # 尝试从全局节点映射导入
+                                import sys
+                                import importlib
+                                module_name = 'batch_text_loader'
+                                # 尝试多种导入路径
+                                for prefix in ['', 'ComfyUI.custom_nodes.ComfyUI-VVL-Tools.', 'custom_nodes.ComfyUI-VVL-Tools.']:
+                                    full_name = prefix + module_name
+                                    try:
+                                        if full_name in sys.modules:
+                                            module = sys.modules[full_name]
+                                            VVL_Load_Text_Batch = getattr(module, 'VVL_Load_Text_Batch', None)
+                                            if VVL_Load_Text_Batch:
+                                                break
+                                        else:
+                                            module = importlib.import_module(full_name)
+                                            VVL_Load_Text_Batch = getattr(module, 'VVL_Load_Text_Batch', None)
+                                            if VVL_Load_Text_Batch:
+                                                break
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+                        
+                        if not VVL_Load_Text_Batch:
+                            logger.debug(f"[VVL] _resolve_constant_string: 无法导入 VVL_Load_Text_Batch，跳过处理")
+                            # 向后兼容：如果无法导入，继续执行其他处理逻辑
+                            # 这确保了即使VVL_Load_Text_Batch不存在，原有功能仍然正常工作
+                        else:
+                            try:
+                                # 创建独立的加载器实例，避免影响原有状态
+                                loader = VVL_Load_Text_Batch()
+                                
+                                # 根据不同模式进行处理
+                                if mode == "single_file":
+                                    # single_file模式：使用指定的index
+                                    result = loader.load_batch_texts(
+                                        path=path, pattern=pattern, index=index, mode=mode,
+                                        seed=seed, label='temp_compile_time', encoding=encoding,
+                                        filename_only=filename_only, skip_empty=skip_empty
+                                    )
+                                elif mode == "incremental_file":
+                                    # incremental_file模式：为了避免状态污染，使用single_file模式并设置index=0
+                                    # 这确保了编译期解析的一致性
+                                    logger.debug(f"[VVL] _resolve_constant_string: incremental_file模式，使用index=0进行编译期解析")
+                                    result = loader.load_batch_texts(
+                                        path=path, pattern=pattern, index=0, mode="single_file",
+                                        seed=seed, label='temp_compile_time', encoding=encoding,
+                                        filename_only=filename_only, skip_empty=skip_empty
+                                    )
+                                elif mode == "random":
+                                    # random模式：使用提供的seed确保确定性
+                                    result = loader.load_batch_texts(
+                                        path=path, pattern=pattern, index=index, mode=mode,
+                                        seed=seed, label='temp_compile_time', encoding=encoding,
+                                        filename_only=filename_only, skip_empty=skip_empty
+                                    )
+                                else:
+                                    # 未知模式，使用single_file作为备选
+                                    logger.debug(f"[VVL] _resolve_constant_string: 未知模式 {mode}，使用 single_file 作为备选")
+                                    result = loader.load_batch_texts(
+                                        path=path, pattern=pattern, index=index, mode="single_file",
+                                        seed=seed, label='temp_compile_time', encoding=encoding,
+                                        filename_only=filename_only, skip_empty=skip_empty
+                                    )
+                                
+                                if result and len(result) > 0:
+                                    text_content = result[0]  # 第一个返回值是text_content
+                                    if isinstance(text_content, str) and text_content.strip():
+                                        logger.debug(f"[VVL] _resolve_constant_string: VVL_Load_Text_Batch ({mode}) 成功获取文本内容，长度={len(text_content)}")
+                                        return text_content
+                                    else:
+                                        logger.debug(f"[VVL] _resolve_constant_string: VVL_Load_Text_Batch 返回空内容")
+                                else:
+                                    logger.debug(f"[VVL] _resolve_constant_string: VVL_Load_Text_Batch 执行失败或无结果")
+                                    
+                            except Exception as e:
+                                logger.debug(f"[VVL] _resolve_constant_string: VVL_Load_Text_Batch 实例化或执行异常: {e}")
+                                
+                    except Exception as e:
+                        logger.debug(f"[VVL] _resolve_constant_string: VVL_Load_Text_Batch 整体处理异常: {e}")
+                    # 继续执行其他处理逻辑，确保向后兼容
+                
                 # JsonMarkdownCleaner: 复用其清理逻辑
-                if "jsonmarkdowncleaner" in ct.lower():
+                elif "jsonmarkdowncleaner" in ct.lower():
                     nested = src.get("inputs", {}).get("json_text", None)
                     s = self._resolve_constant_string(dynprompt, nested)
                     if isinstance(s, str):
@@ -560,11 +683,24 @@ class VVLForLoopEndAsync:
                         if txt.endswith("```"):
                             txt = txt[:-3].strip()
                         return txt
+                
+                # 其他文本加载节点的通用处理
+                elif any(keyword in ct.lower() for keyword in ["load", "text", "file", "batch"]):
+                    logger.debug(f"[VVL] _resolve_constant_string: 检测到文本加载类节点: {ct}")
+                    # 尝试从输出中获取文本内容（针对已执行的节点）
+                    # 注意：这种方法在编译期可能无效，但可以作为备选方案
+                    
                 # 一般性透传：尝试常见键
-                for key in ("text", "string", "json_text", "value"):
+                for key in ("text", "string", "json_text", "value", "content", "data"):
                     v = src.get("inputs", {}).get(key, None)
                     if isinstance(v, str) and not is_link(v):
                         return v
+                    # 递归解析链接的输入
+                    elif is_link(v):
+                        resolved = self._resolve_constant_string(dynprompt, v)
+                        if isinstance(resolved, str):
+                            return resolved
+                            
         except Exception as e:
             logger.debug(f"[VVL] _resolve_constant_string: 解析异常: {e}")
         return None
