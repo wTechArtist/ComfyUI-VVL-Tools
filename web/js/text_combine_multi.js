@@ -5,7 +5,14 @@ app.registerExtension({
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
 		if (!nodeData) return;
 		
-		const isTextCombine = nodeData.name === "TextCombineMulti" || nodeData?.title === "Text Combine Multi (VVL)";
+		// 检查是否是TextCombineMulti节点
+		const isTextCombine = nodeData.name === "TextCombineMulti";
+		
+		// 只为TextCombineMulti节点添加调试信息
+		if (isTextCombine) {
+			console.log("[VVL.TextCombineMulti] Found TextCombineMulti node:", nodeData);
+		}
+		
 		if (isTextCombine) {
 				// 动态管理文本widget：根据inputcount添加/删除文本输入框
 				function removeExtraTextWidgets(node, maxInputs = 2) {
@@ -79,6 +86,12 @@ app.registerExtension({
 				nodeType.prototype.onNodeCreated = function () {
 					// 重建 text_* 输入端口：仅移除多余的，添加缺失的，保留已连接的
 					const rebuildTextInputs = (targetCount) => {
+						// 检查节点是否已经添加到图形中
+						if (!this.graph) {
+							console.debug("[TextCombineMulti] Node not added to graph yet, skipping input rebuild");
+							return;
+						}
+						
 						if (!this.inputs) this.inputs = [];
 						// 记录现有的 text_* 名称集合
 						const existing = new Set();
@@ -95,15 +108,23 @@ app.registerExtension({
 							if (input && input.name && input.name.startsWith("text_")) {
 								const num = parseInt(input.name.replace("text_", ""));
 								if (num > targetCount) {
-									this.removeInput(i);
-									existing.delete(num);
+									try {
+										this.removeInput(i);
+										existing.delete(num);
+									} catch (e) {
+										console.warn("[TextCombineMulti] Failed to remove input:", e);
+									}
 								}
 							}
 						}
 						// 添加缺失的 1..targetCount
 						for (let i = 1; i <= targetCount; i++) {
 							if (!existing.has(i)) {
-								this.addInput(`text_${i}`, "STRING");
+								try {
+									this.addInput(`text_${i}`, "STRING");
+								} catch (e) {
+									console.warn("[TextCombineMulti] Failed to add input:", e);
+								}
 							}
 						}
 					};
@@ -118,9 +139,20 @@ app.registerExtension({
 						this.setDirtyCanvas?.(true, true);
 					};
 
-					const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
-					if (inputCountWidget) {
-						applyCount(inputCountWidget.value);
+					// 延迟初始化，等待节点添加到图形中
+					const delayedInit = () => {
+						const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
+						if (inputCountWidget) {
+							applyCount(inputCountWidget.value);
+						}
+					};
+					
+					// 如果节点已经在图形中，立即初始化
+					if (this.graph) {
+						delayedInit();
+					} else {
+						// 否则等待添加到图形后再初始化
+						setTimeout(delayedInit, 0);
 					}
 
 					// Add update inputs button
@@ -132,6 +164,7 @@ app.registerExtension({
 					});
 
 					// 监听 inputcount 变化
+					const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
 					if (inputCountWidget) {
 						const originalCallback = inputCountWidget.callback;
 						inputCountWidget.callback = function(value) {
@@ -144,31 +177,47 @@ app.registerExtension({
 					const onAdded = nodeType.prototype.onAdded;
 					nodeType.prototype.onAdded = function() {
 						if (onAdded) onAdded.apply(this, arguments);
+						// 节点已添加到图形，安全地应用配置
 						const w = this.widgets?.find(w => w.name === "inputcount");
-						if (w) setTimeout(() => applyCount(w.value), 0);
+						if (w) {
+							console.debug("[TextCombineMulti] Node added to graph, applying count:", w.value);
+							setTimeout(() => applyCount(w.value), 0);
+						}
 					};
 
 					// 在反序列化或配置后也应用
 					const onConfigure = nodeType.prototype.onConfigure;
 					nodeType.prototype.onConfigure = function(o) {
 						if (onConfigure) onConfigure.apply(this, arguments);
-						const w = this.widgets?.find(w => w.name === "inputcount");
-						if (w) setTimeout(() => applyCount(w.value), 0);
+						
+						// 恢复序列化的数量设置
+						if (o && typeof o.vvl_text_count === "number") {
+							setTimeout(() => applyCount(o.vvl_text_count), 0);
+						} else {
+							const w = this.widgets?.find(w => w.name === "inputcount");
+							if (w) setTimeout(() => applyCount(w.value), 0);
+						}
 					};
 
 					// 连接变化时也应用（有些前端在连接变化时会刷新端口）
 					const onConnectionsChange = nodeType.prototype.onConnectionsChange;
 					nodeType.prototype.onConnectionsChange = function(type, slot, isConnected, linkInfo, ioSlot) {
 						if (onConnectionsChange) onConnectionsChange.apply(this, arguments);
-						const w = this.widgets?.find(w => w.name === "inputcount");
-						if (w) setTimeout(() => applyCount(w.value), 0);
+						// 只有在节点已添加到图形时才处理
+						if (this.graph) {
+							const w = this.widgets?.find(w => w.name === "inputcount");
+							if (w) setTimeout(() => applyCount(w.value), 0);
+						}
 					};
 
 					const onConnectionsChainChange = nodeType.prototype.onConnectionsChainChange;
 					nodeType.prototype.onConnectionsChainChange = function() {
 						if (onConnectionsChainChange) onConnectionsChainChange.apply(this, arguments);
-						const w = this.widgets?.find(w => w.name === "inputcount");
-						if (w) setTimeout(() => applyCount(w.value), 0);
+						// 只有在节点已添加到图形时才处理
+						if (this.graph) {
+							const w = this.widgets?.find(w => w.name === "inputcount");
+							if (w) setTimeout(() => applyCount(w.value), 0);
+						}
 					};
 
 					// 序列化/反序列化保存数量，便于恢复
@@ -179,11 +228,8 @@ app.registerExtension({
 						if (w) o.vvl_text_count = w.value;
 					};
 
-					const onConfigure2 = nodeType.prototype.onConfigure;
-					nodeType.prototype.onConfigure = function(o) {
-						if (onConfigure2) onConfigure2.apply(this, arguments);
-						if (o && typeof o.vvl_text_count === "number") setTimeout(() => applyCount(o.vvl_text_count), 0);
-					};
+					// 注意：onConfigure已经在上面重写过了，这里会导致无限递归
+					// 将序列化恢复逻辑合并到现有的onConfigure中
 				}
 		}
 	},
