@@ -96,5 +96,14 @@ try:
 except ImportError as e:
     logger.warning(f"Failed to load batch text loader node: {e}")
 
+try:
+    from .text_combine_multi import NODE_CLASS_MAPPINGS as TEXT_COMBINE_MAPPINGS
+    from .text_combine_multi import NODE_DISPLAY_NAME_MAPPINGS as TEXT_COMBINE_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(TEXT_COMBINE_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(TEXT_COMBINE_DISPLAY_MAPPINGS)
+    logger.info("Loaded text combine multi node")
+except ImportError as e:
+    logger.warning(f"Failed to load text combine multi node: {e}")
+
 # 导出给ComfyUI
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']

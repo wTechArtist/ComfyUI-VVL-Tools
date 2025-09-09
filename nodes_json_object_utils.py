@@ -1229,6 +1229,7 @@ class DimensionReorderAndScale:
     处理格式如 [10, 10, 0.3] 的三维数据：
     • 支持任意调换长(length)、宽(width)、高(height)的位置
     • 提供缩放因子控制整体大小
+    • 支持最小值和最大值限制（最后检验阶段）
     • 输出时默认移除方括号，返回逗号分隔的字符串
     
     📐 输入格式支持：
@@ -1247,6 +1248,13 @@ class DimensionReorderAndScale:
     ⚙️ 缩放控制：
     • scale_factor: 全局缩放因子 (默认 1.0)
     • 所有三个维度都会乘以此因子
+    
+    🔒 数值限制：
+    • min_value: 最小值限制 (默认 1.0)
+    • max_value: 最大值限制 (默认 2000.0)
+    • 任何小于最小值的数值会被强制设为最小值
+    • 任何大于最大值的数值会被强制设为最大值
+    • 限制在最后检验阶段执行
     
     📤 输出格式：
     • 默认: "10.0,10.0,0.3" (逗号分隔，无空格)
@@ -1290,11 +1298,25 @@ class DimensionReorderAndScale:
                     "label_off": "保留空格",
                     "tooltip": "是否移除输出中的所有空格\n• 开启: '10.00,10.00,0.30'\n• 关闭: '10.00, 10.00, 0.30'"
                 }),
+                "min_value": (IO.FLOAT, {
+                    "default": 1.0, 
+                    "min": 0.001, 
+                    "max": 999999.0, 
+                    "step": 0.01,
+                    "tooltip": "最小值限制\n任何小于此值的维度都会被强制设为此值\n默认: 1.0"
+                }),
+                "max_value": (IO.FLOAT, {
+                    "default": 2000.0, 
+                    "min": 0.001, 
+                    "max": 999999.0, 
+                    "step": 0.01,
+                    "tooltip": "最大值限制\n任何大于此值的维度都会被强制设为此值\n默认: 2000.0"
+                }),
             },
         }
     
-    RETURN_TYPES = (IO.STRING,)
-    RETURN_NAMES = ("reordered_dimensions",)
+    RETURN_TYPES = ("*", "*", "*", "*")
+    RETURN_NAMES = ("reordered_dimensions", "dimension_1", "dimension_2", "dimension_3")
     FUNCTION = "reorder_and_scale"
     CATEGORY = "VVL/json"
     
@@ -1347,7 +1369,19 @@ class DimensionReorderAndScale:
         
         return reorder_map.get(pattern, [length, width, height])
     
-    def reorder_and_scale(self, dimension_data, reorder_pattern="LWH", scale_factor=1.0, keep_brackets=False, decimal_places=2, remove_spaces=True, **kwargs):
+    def _clamp_values(self, values, min_value, max_value):
+        """将数值限制在最小值和最大值之间"""
+        clamped_values = []
+        for value in values:
+            if value < min_value:
+                clamped_values.append(min_value)
+            elif value > max_value:
+                clamped_values.append(max_value)
+            else:
+                clamped_values.append(value)
+        return clamped_values
+    
+    def reorder_and_scale(self, dimension_data, reorder_pattern="LWH", scale_factor=1.0, keep_brackets=False, decimal_places=2, remove_spaces=True, min_value=1.0, max_value=2000.0, **kwargs):
         """重新排序和缩放三维数据"""
         try:
             # 解析输入数据
@@ -1356,7 +1390,7 @@ class DimensionReorderAndScale:
             if parsed_data is None:
                 error_msg = "无法解析输入的三维数据。期望格式: [10, 10, 0.3] 或 '10, 10, 0.3'"
                 print(f"DimensionReorderAndScale error: {error_msg}")
-                return (error_msg,)
+                return (error_msg, 0.0, 0.0, 0.0)
             
             # 应用缩放因子
             scaled_data = [value * scale_factor for value in parsed_data]
@@ -1364,14 +1398,20 @@ class DimensionReorderAndScale:
             # 重新排列维度
             reordered_data = self._reorder_dimensions(scaled_data, reorder_pattern)
             
-            # 格式化输出
+            # 应用最小值最大值限制（最后检验）
+            clamped_data = self._clamp_values(reordered_data, min_value, max_value)
+            
+            # 格式化输出和单独数值
             if decimal_places == 0:
                 # 整数格式
-                formatted_values = [str(int(round(value))) for value in reordered_data]
+                formatted_values = [str(int(round(value))) for value in clamped_data]
+                formatted_numbers = [int(round(value)) for value in clamped_data]
             else:
                 # 小数格式
                 format_str = f"{{:.{decimal_places}f}}"
-                formatted_values = [format_str.format(value) for value in reordered_data]
+                formatted_values = [format_str.format(value) for value in clamped_data]
+                # 单独数值也应用相同的小数精度
+                formatted_numbers = [round(value, decimal_places) for value in clamped_data]
             
             # 组装最终字符串
             separator = "," if remove_spaces else ", "
@@ -1388,14 +1428,17 @@ class DimensionReorderAndScale:
             print(f"  缩放后: {scaled_data}")
             print(f"  重排模式: {reorder_pattern}")
             print(f"  重排后: {reordered_data}")
+            print(f"  数值限制: [{min_value}, {max_value}]")
+            print(f"  限制后: {clamped_data}")
             print(f"  最终输出: {result}")
+            print(f"  单独输出: {formatted_numbers[0]}, {formatted_numbers[1]}, {formatted_numbers[2]}")
             
-            return (result,)
+            return (result, formatted_numbers[0], formatted_numbers[1], formatted_numbers[2])
             
         except Exception as e:
             error_msg = f"处理三维数据时出错: {str(e)}"
             print(f"DimensionReorderAndScale error: {error_msg}")
-            return (error_msg,)
+            return (error_msg, 0.0, 0.0, 0.0)
 
 
 # Node class mappings
