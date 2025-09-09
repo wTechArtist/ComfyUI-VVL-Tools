@@ -87,5 +87,14 @@ try:
 except ImportError as e:
     logger.warning(f"Failed to load room generator nodes: {e}")
 
+try:
+    from .batch_text_loader import NODE_CLASS_MAPPINGS as TEXT_LOADER_MAPPINGS
+    from .batch_text_loader import NODE_DISPLAY_NAME_MAPPINGS as TEXT_LOADER_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(TEXT_LOADER_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(TEXT_LOADER_DISPLAY_MAPPINGS)
+    logger.info("Loaded batch text loader node")
+except ImportError as e:
+    logger.warning(f"Failed to load batch text loader node: {e}")
+
 # 导出给ComfyUI
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
