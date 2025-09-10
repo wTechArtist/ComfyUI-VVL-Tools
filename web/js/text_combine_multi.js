@@ -19,7 +19,7 @@ app.registerExtension({
 					if (!node.widgets) return;
 					
 					// 从后往前移除多余的text widget（但保留控制widget）
-					const controlWidgetNames = ["inputcount", "separator", "Update inputs"];
+					const controlWidgetNames = ["inputcount", "separator"];
 					
 					for (let i = node.widgets.length - 1; i >= 0; i--) {
 						const widget = node.widgets[i];
@@ -37,7 +37,7 @@ app.registerExtension({
 					
 					// 找到控制widget的索引（inputcount, separator, Update inputs按钮）
 					const controlWidgets = [];
-					const controlWidgetNames = ["inputcount", "separator", "Update inputs"];
+					const controlWidgetNames = ["inputcount", "separator"];
 					
 					// 保存控制widget
 					for (let i = node.widgets.length - 1; i >= 0; i--) {
@@ -111,13 +111,6 @@ app.registerExtension({
 						setTimeout(delayedInit, 0);
 					}
 
-					// Add update inputs button
-					this.addWidget("button", "Update inputs", null, () => {
-						const inputCountWidget = this.widgets.find(w => w.name === "inputcount");
-						if (!inputCountWidget) return;
-						const target_number_of_inputs = inputCountWidget.value;
-						applyCount(target_number_of_inputs);
-					});
 
 					// 监听 inputcount 变化
 					const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");

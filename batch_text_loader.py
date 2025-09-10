@@ -18,6 +18,14 @@ class VVL_Load_Text_Batch:
     """
     批量加载文本文件节点
     支持单个文件、递增模式、随机模式
+    
+    Pattern搜索模式说明:
+    - *.txt: 仅当前目录的txt文件
+    - **/*.txt: 递归搜索所有子目录的txt文件 (推荐)
+    - *.*: 当前目录所有支持的文件类型
+    - **/*.*: 递归搜索所有支持的文件类型
+    
+    支持的文件扩展名: .txt, .text, .md, .log, .csv, .json, .yaml, .yml
     """
     def __init__(self):
         # 简化存储，不依赖外部数据库
@@ -32,14 +40,13 @@ class VVL_Load_Text_Batch:
                 "mode": (["single_file", "incremental_file", "random"],),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "index": ("INT", {"default": 0, "min": 0, "max": 150000, "step": 1}),
-                "label": ("STRING", {"default": 'TextBatch001', "multiline": False}),
+                "label": ("STRING", {"default": 'TextBatch001', "multiline": False, "tooltip": "批处理任务标识符，用于状态管理和任务隔离\n• 不同的label会有独立的进度状态\n• 即使路径和模式相同，不同label的任务也不会互相干扰\n• 建议使用有意义的名称，如: prompt_templates, style_descriptions等\n• 在incremental_file模式下，每个label都会独立记录当前文件索引"}),
                 "path": ("STRING", {"default": '', "multiline": False}),
-                "pattern": ("STRING", {"default": '*.txt', "multiline": False}),
+                "pattern": ("STRING", {"default": '**/*.txt', "multiline": False, "tooltip": "文件搜索模式:\n*.txt - 仅当前目录的txt文件\n**/*.txt - 递归搜索所有子目录的txt文件\n*.* - 当前目录所有支持的文件类型\n**/*.* - 递归搜索所有支持的文件类型\n支持的扩展名: .txt, .text, .md, .log, .csv, .json, .yaml, .yml"}),
                 "encoding": (["utf-8", "gbk", "gb2312", "utf-16", "ascii"],),
             },
             "optional": {
-                "filename_only": (["false", "true"],),
-                "skip_empty": (["true", "false"],),
+                "skip_empty": (["true", "false"],{"tooltip": "跳过空文件"}),
             }
         }
 
@@ -51,7 +58,7 @@ class VVL_Load_Text_Batch:
 
     def load_batch_texts(self, path, pattern='*.txt', index=0, mode="single_file", 
                         seed=0, label='TextBatch001', encoding='utf-8', 
-                        filename_only='false', skip_empty='true'):
+                        skip_empty='true'):
         
         # 检查路径是否存在
         if not os.path.exists(path):
@@ -92,10 +99,6 @@ class VVL_Load_Text_Batch:
                 logger.error("No valid text file found for random selection")
                 return ("", "", [], len(text_paths))
 
-        # 处理文件名选项
-        if filename_only == "true":
-            filename = os.path.splitext(filename)[0]
-
         # 将文本内容按行分割成列表
         all_lines = text_content.splitlines() if text_content else []
 
@@ -123,7 +126,20 @@ class VVL_Load_Text_Batch:
             self.index = self.state['index']
 
         def load_texts(self, directory_path, pattern):
-            """加载匹配模式的文本文件"""
+            """
+            加载匹配模式的文本文件
+            
+            Args:
+                directory_path: 搜索的目录路径
+                pattern: 文件搜索模式
+                    - *.txt: 仅当前目录的txt文件
+                    - **/*.txt: 递归搜索所有子目录的txt文件
+                    - *.*: 当前目录所有支持的文件类型
+                    - **/*.*: 递归搜索所有支持的文件类型
+                    
+            支持的文件扩展名:
+                .txt, .text, .md, .log, .csv, .json, .yaml, .yml
+            """
             try:
                 search_pattern = os.path.join(directory_path, pattern)
                 for file_path in glob.glob(search_pattern, recursive=True):
