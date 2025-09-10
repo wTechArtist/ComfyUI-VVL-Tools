@@ -14,34 +14,6 @@ app.registerExtension({
 		}
 		
 		if (isTextCombine) {
-				// 动态管理文本widget：根据inputcount添加/删除文本输入框
-				function updateInputSocketsVisibility(node, maxInputs) {
-					// 隐藏多余 text_N 的输入端口，显示需要的端口
-					if (!node.inputs || !Array.isArray(node.inputs)) return;
-					for (let i = 0; i < node.inputs.length; i++) {
-						const input = node.inputs[i];
-						if (!input || typeof input.name !== "string") continue;
-						if (input.name.startsWith("text_")) {
-							const num = parseInt(input.name.replace("text_", ""));
-							if (!Number.isNaN(num)) {
-								// 使用type = -1 来隐藏输入端口
-								if (num > maxInputs) {
-									// 断开连接并隐藏
-									if (input.link != null && typeof node.disconnectInput === "function") {
-										node.disconnectInput(i);
-									}
-									input.type = -1;
-								} else {
-									// 恢复正常类型
-									if (input.type === -1) {
-										input.type = "STRING";
-									}
-								}
-							}
-						}
-					}
-				}
-
 				// -------- Widgets 处理 --------
 				function removeExtraTextWidgets(node, maxInputs = 2) {
 					if (!node.widgets) return;
@@ -111,24 +83,80 @@ app.registerExtension({
 					});
 				}
 
+				// 重写序列化方法（在原型上）
+				const originalSerialize = nodeType.prototype.serialize;
+				nodeType.prototype.serialize = function() {
+					const o = originalSerialize ? originalSerialize.call(this) : {};
+					// 保存inputcount的值
+					const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
+					if (inputCountWidget) {
+						o.vvl_inputcount = inputCountWidget.value;
+					}
+					return o;
+				};
+
+				// 重写configure方法（在原型上）
+				const originalConfigure = nodeType.prototype.onConfigure;
+				nodeType.prototype.onConfigure = function(o) {
+					if (originalConfigure) originalConfigure.call(this, o);
+					
+					// 延迟处理，确保widgets已经从widgets_values恢复
+					setTimeout(() => {
+						const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
+						if (inputCountWidget && inputCountWidget.value && this.applyCountFunction) {
+							// 使用widget的实际值，它应该已经从widgets_values恢复了
+							this.applyCountFunction(inputCountWidget.value, true);
+						}
+					}, 10); // 稍微延迟一点确保widget值已经恢复
+				};
+
 				nodeType.prototype.onNodeCreated = function () {
-					// 简单的widget管理，不触碰输入端口
-					const applyCount = (count) => {
-						console.log("[TextCombineMulti] applyCount", count, this.id);
-						// 管理 widgets 与 输入端口可见性
+					const self = this;
+					
+					// 动态管理文本widget和输入端口的可见性
+					const updateInputSocketsVisibility = (node, maxInputs) => {
+						// 完全不修改输入端口的属性，只断开多余的连接
+						if (!node.inputs || !Array.isArray(node.inputs)) return;
+						for (let i = 0; i < node.inputs.length; i++) {
+							const input = node.inputs[i];
+							if (!input || typeof input.name !== "string") continue;
+							if (input.name.startsWith("text_")) {
+								const num = parseInt(input.name.replace("text_", ""));
+								if (!Number.isNaN(num) && num > maxInputs) {
+									// 只断开连接，不修改任何端口属性
+									if (input.link != null && typeof node.disconnectInput === "function") {
+										node.disconnectInput(i);
+									}
+								}
+							}
+						}
+					};
+					
+					// 简单的widget管理
+					const applyCount = (count, preserveConnections = false) => {
+						console.log("[TextCombineMulti] applyCount", count, this.id, "preserveConnections:", preserveConnections);
+						// 管理 widgets
 						removeExtraTextWidgets(this, count);
 						ensureTextWidgets(this, count);
-						updateInputSocketsVisibility(this, count);
+						
+						// 只有用户手动修改时才断开连接
+						if (!preserveConnections) {
+							updateInputSocketsVisibility(this, count);
+						}
+						
 						// 让节点重新计算大小
 						this.setSize?.(this.computeSize?.());
 						this.setDirtyCanvas?.(true, true);
 					};
 
+					// 保存applyCount函数的引用，供onConfigure使用
+					this.applyCountFunction = applyCount;
+
 					// 延迟初始化，等待节点添加到图形中
 					const delayedInit = () => {
 						const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
 						if (inputCountWidget) {
-							applyCount(inputCountWidget.value);
+							applyCount(inputCountWidget.value, true); // 初始化时保留连接
 						}
 					};
 					
@@ -140,55 +168,20 @@ app.registerExtension({
 						setTimeout(delayedInit, 0);
 					}
 
-
 					// 监听 inputcount 变化
 					const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
 					if (inputCountWidget) {
+						// 保留原始的callback引用
 						const originalCallback = inputCountWidget.callback;
 						inputCountWidget.callback = function(value) {
-							if (originalCallback) originalCallback.call(this, value);
-							applyCount(value);
+							// 先调用原始callback（这会处理输入框的关闭等逻辑）
+							if (originalCallback) {
+								originalCallback.apply(this, arguments);
+							}
+							// 应用新的count值
+							applyCount(value, false); // 用户手动更改时允许断开连接
 						};
 					}
-
-					// 节点添加到画布后应用配置
-					const onAdded = nodeType.prototype.onAdded;
-					nodeType.prototype.onAdded = function() {
-						if (onAdded) onAdded.apply(this, arguments);
-						// 节点已添加到图形，安全地应用配置
-						const w = this.widgets?.find(w => w.name === "inputcount");
-						if (w) {
-							console.log("[TextCombineMulti] Node added to graph, applying count:", w.value);
-							setTimeout(() => applyCount(w.value), 0);
-						}
-					};
-
-					// 在反序列化或配置后也应用
-					const onConfigure = nodeType.prototype.onConfigure;
-					nodeType.prototype.onConfigure = function(o) {
-						if (onConfigure) onConfigure.apply(this, arguments);
-						
-						// 恢复序列化的数量设置
-						if (o && typeof o.vvl_text_count === "number") {
-							setTimeout(() => applyCount(o.vvl_text_count), 0);
-						} else {
-							const w = this.widgets?.find(w => w.name === "inputcount");
-							if (w) setTimeout(() => applyCount(w.value), 0);
-						}
-					};
-
-					// 移除连接变化时的重建逻辑，让ComfyUI自然处理
-
-					// 序列化/反序列化保存数量，便于恢复
-					const onSerialize = nodeType.prototype.onSerialize;
-					nodeType.prototype.onSerialize = function(o) {
-						if (onSerialize) onSerialize.apply(this, arguments);
-						const w = this.widgets?.find(w => w.name === "inputcount");
-						if (w) o.vvl_text_count = w.value;
-					};
-
-					// 注意：onConfigure已经在上面重写过了，这里会导致无限递归
-					// 将序列化恢复逻辑合并到现有的onConfigure中
 				}
 		}
 	},
