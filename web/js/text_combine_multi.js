@@ -83,35 +83,11 @@ app.registerExtension({
 					});
 				}
 
-				// 重写序列化方法（在原型上）
-				const originalSerialize = nodeType.prototype.serialize;
-				nodeType.prototype.serialize = function() {
-					const o = originalSerialize ? originalSerialize.call(this) : {};
-					// 保存inputcount的值
-					const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
-					if (inputCountWidget) {
-						o.vvl_inputcount = inputCountWidget.value;
-					}
-					return o;
-				};
+				// 不需要重写序列化，让ComfyUI自己处理
 
-				// 重写configure方法（在原型上）
-				const originalConfigure = nodeType.prototype.onConfigure;
-				nodeType.prototype.onConfigure = function(o) {
-					if (originalConfigure) originalConfigure.call(this, o);
-					
-					// 延迟处理，确保widgets已经从widgets_values恢复
-					setTimeout(() => {
-						const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
-						if (inputCountWidget && inputCountWidget.value && this.applyCountFunction) {
-							// 使用widget的实际值，它应该已经从widgets_values恢复了
-							this.applyCountFunction(inputCountWidget.value, true);
-						}
-					}, 10); // 稍微延迟一点确保widget值已经恢复
-				};
+				// 不需要重写configure方法，让节点自己处理
 
 				nodeType.prototype.onNodeCreated = function () {
-					const self = this;
 					
 					// 动态管理文本widget和输入端口的可见性
 					const updateInputSocketsVisibility = (node, maxInputs) => {
@@ -133,11 +109,15 @@ app.registerExtension({
 					};
 					
 					// 简单的widget管理
-					const applyCount = (count, preserveConnections = false) => {
-						console.log("[TextCombineMulti] applyCount", count, this.id, "preserveConnections:", preserveConnections);
-						// 管理 widgets
-						removeExtraTextWidgets(this, count);
-						ensureTextWidgets(this, count);
+					const applyCount = (count, preserveConnections = false, skipWidgetRebuild = false) => {
+						console.log("[TextCombineMulti] applyCount", count, this.id, "preserveConnections:", preserveConnections, "skipWidgetRebuild:", skipWidgetRebuild);
+						
+						// 如果不跳过widget重建，则管理widgets
+						if (!skipWidgetRebuild) {
+							// 管理 widgets
+							removeExtraTextWidgets(this, count);
+							ensureTextWidgets(this, count);
+						}
 						
 						// 只有用户手动修改时才断开连接
 						if (!preserveConnections) {
@@ -149,11 +129,114 @@ app.registerExtension({
 						this.setDirtyCanvas?.(true, true);
 					};
 
-					// 保存applyCount函数的引用，供onConfigure使用
-					this.applyCountFunction = applyCount;
 
+					// 保存applyCount的引用到节点实例
+					const nodeApplyCount = applyCount;
+					
+					// 重写onConfigure来处理序列化恢复
+					this.onConfigure = function(o) {
+						// 调用任何父类的onConfigure
+						if (nodeType.prototype.onConfigure) {
+							nodeType.prototype.onConfigure.call(this, o);
+						}
+						
+						// 标记正在配置
+						this._isConfiguring = true;
+						
+						// 延迟确保widgets已完全恢复
+						setTimeout(() => {
+							console.log("[TextCombineMulti] onConfigure", this.id, "widgets_values:", o?.widgets_values);
+							
+							// 创建一个临时存储来保存所有值
+							const allValues = {};
+							
+							// 先从当前widgets获取值（ComfyUI可能已经部分恢复了）
+							// 但不包括inputcount，因为它可能是错误的
+							if (this.widgets) {
+								this.widgets.forEach(w => {
+									if (w.name !== 'inputcount') {
+										allValues[w.name] = w.value;
+									}
+								});
+							}
+							
+							// 初始化targetCount，先不要从当前widgets获取，避免干扰
+							let targetCount = 2;
+							
+							// 如果widgets_values存在，尝试更准确地获取inputcount
+							if (o && o.widgets_values && Array.isArray(o.widgets_values)) {
+								console.log("[TextCombineMulti] Searching for inputcount in widgets_values...");
+								
+								// 在widgets_values中查找inputcount值
+								// inputcount是一个数字类型，而且是整数，范围在2-20之间
+								let inputcountIndex = -1;
+								for (let i = 0; i < o.widgets_values.length; i++) {
+									const value = o.widgets_values[i];
+									console.log(`[TextCombineMulti] Index ${i}: value = ${value}, type = ${typeof value}`);
+									
+									// 严格检查：必须是数字类型，整数，且在有效范围内
+									if (typeof value === 'number' && 
+									    Number.isInteger(value) && 
+									    value >= 2 && 
+									    value <= 20) {
+										targetCount = value;
+										inputcountIndex = i;
+										console.log("[TextCombineMulti] Found inputcount at index", i, "value:", value);
+										// 找到第一个符合条件的就是inputcount
+										break;
+									}
+								}
+								
+								// 基于找到的inputcount位置，恢复widget值
+								if (inputcountIndex >= 0) {
+									// inputcount前面应该有：targetCount个text widget + 1个separator
+									// 所以 inputcountIndex 应该等于 targetCount + 1
+									
+									// 恢复text widget的值
+									for (let i = 0; i < targetCount && i < o.widgets_values.length; i++) {
+										allValues[`text_${i + 1}`] = o.widgets_values[i] || "";
+									}
+									
+									// 恢复separator（在inputcount前一个位置）
+									if (inputcountIndex > 0) {
+										allValues.separator = o.widgets_values[inputcountIndex - 1] || "";
+									}
+									
+									// 恢复inputcount
+									allValues.inputcount = targetCount;
+								}
+							}
+							
+							console.log("[TextCombineMulti] Restoring with targetCount:", targetCount, "allValues:", allValues);
+							
+							// 应用正确的布局
+							nodeApplyCount(targetCount, true, false);
+							
+							// 恢复所有widget的值
+							setTimeout(() => {
+								if (this.widgets) {
+									this.widgets.forEach(w => {
+										if (allValues[w.name] !== undefined) {
+											w.value = allValues[w.name];
+										}
+									});
+									
+									// 确保inputcount是正确的数字
+									const inputCountWidget = this.widgets.find(w => w.name === 'inputcount');
+									if (inputCountWidget) {
+										inputCountWidget.value = targetCount;
+									}
+								}
+								this._isConfiguring = false;
+							}, 10);
+						}, 50);
+					};
+					
 					// 延迟初始化，等待节点添加到图形中
 					const delayedInit = () => {
+						// 如果正在配置中，跳过初始化
+						if (this._isConfiguring) return;
+						
 						const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
 						if (inputCountWidget) {
 							applyCount(inputCountWidget.value, true); // 初始化时保留连接
@@ -162,7 +245,11 @@ app.registerExtension({
 					
 					// 如果节点已经在图形中，立即初始化
 					if (this.graph) {
-						delayedInit();
+						// 检查是否有widgets，如果没有说明可能是新创建的
+						if (!this.widgets || this.widgets.length === 0) {
+							delayedInit();
+						}
+						// 如果已经有widgets，说明可能是从序列化恢复的，让onConfigure处理
 					} else {
 						// 否则等待添加到图形后再初始化
 						setTimeout(delayedInit, 0);
