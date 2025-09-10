@@ -558,7 +558,6 @@ class VVLForLoopEndAsync:
                         pattern = str(inputs.get("pattern", "*.txt"))
                         mode = str(inputs.get("mode", "single_file"))
                         encoding = str(inputs.get("encoding", "utf-8"))
-                        filename_only = str(inputs.get("filename_only", "false"))
                         skip_empty = str(inputs.get("skip_empty", "true"))
                         
                         # 解析index参数，支持link输入
@@ -626,7 +625,7 @@ class VVLForLoopEndAsync:
                                     result = loader.load_batch_texts(
                                         path=path, pattern=pattern, index=index, mode=mode,
                                         seed=seed, label='temp_compile_time', encoding=encoding,
-                                        filename_only=filename_only, skip_empty=skip_empty
+                                        skip_empty=skip_empty
                                     )
                                 elif mode == "incremental_file":
                                     # incremental_file模式：为了避免状态污染，使用single_file模式并设置index=0
@@ -635,14 +634,14 @@ class VVLForLoopEndAsync:
                                     result = loader.load_batch_texts(
                                         path=path, pattern=pattern, index=0, mode="single_file",
                                         seed=seed, label='temp_compile_time', encoding=encoding,
-                                        filename_only=filename_only, skip_empty=skip_empty
+                                        skip_empty=skip_empty
                                     )
                                 elif mode == "random":
                                     # random模式：使用提供的seed确保确定性
                                     result = loader.load_batch_texts(
                                         path=path, pattern=pattern, index=index, mode=mode,
                                         seed=seed, label='temp_compile_time', encoding=encoding,
-                                        filename_only=filename_only, skip_empty=skip_empty
+                                        skip_empty=skip_empty
                                     )
                                 else:
                                     # 未知模式，使用single_file作为备选
@@ -650,11 +649,13 @@ class VVLForLoopEndAsync:
                                     result = loader.load_batch_texts(
                                         path=path, pattern=pattern, index=index, mode="single_file",
                                         seed=seed, label='temp_compile_time', encoding=encoding,
-                                        filename_only=filename_only, skip_empty=skip_empty
+                                        skip_empty=skip_empty
                                     )
                                 
                                 if result and len(result) > 0:
                                     text_content = result[0]  # 第一个返回值是text_content
+                                    total_files = result[3] if len(result) > 3 else 0  # 第四个返回值是total_files
+                                    logger.debug(f"[VVL] _resolve_constant_string: VVL_Load_Text_Batch 返回结果：文本长度={len(text_content) if isinstance(text_content, str) else 0}, 总文件数={total_files}")
                                     if isinstance(text_content, str) and text_content.strip():
                                         logger.debug(f"[VVL] _resolve_constant_string: VVL_Load_Text_Batch ({mode}) 成功获取文本内容，长度={len(text_content)}")
                                         return text_content
@@ -710,19 +711,28 @@ class VVLForLoopEndAsync:
         try:
             inputs = node.get("inputs", {})
             json_val = inputs.get("json_text", None)
+            logger.debug(f"[VVL] _try_resolve_length_from_jsonextract: json_val 输入类型={type(json_val)}, 值={json_val}")
             json_text = self._resolve_constant_string(dynprompt, json_val)
             logger.debug(f"[VVL] _try_resolve_length_from_jsonextract: 解析到 json_text 常量={True if isinstance(json_text, str) else False}")
             if isinstance(json_text, str) and json_text:
+                logger.debug(f"[VVL] _try_resolve_length_from_jsonextract: JSON 文本前100字符: {json_text[:100]}...")
                 import json as _json
                 try:
                     data = _json.loads(json_text)
+                    logger.debug(f"[VVL] _try_resolve_length_from_jsonextract: JSON 解析成功，数据类型={type(data)}")
                 except Exception as e:
                     logger.debug(f"[VVL] _try_resolve_length_from_jsonextract: JSON 解析失败: {e}")
+                    logger.debug(f"[VVL] _try_resolve_length_from_jsonextract: 失败的 JSON 文本: {json_text[:200]}")
                     return None
                 objects = data.get("objects", [])
                 if isinstance(objects, list):
-                    return len(objects)
+                    length = len(objects)
+                    logger.debug(f"[VVL] _try_resolve_length_from_jsonextract: 成功解析 objects 长度={length}")
+                    return length
+                logger.debug(f"[VVL] _try_resolve_length_from_jsonextract: objects 不是列表类型: {type(objects)}")
                 return 0
+            else:
+                logger.debug(f"[VVL] _try_resolve_length_from_jsonextract: 无效的 json_text: {json_text}")
         except Exception as e:
             logger.debug(f"[VVL] _try_resolve_length_from_jsonextract: 解析异常: {e}")
         return None
