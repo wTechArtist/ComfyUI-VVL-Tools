@@ -15,6 +15,34 @@ app.registerExtension({
 		
 		if (isTextCombine) {
 				// 动态管理文本widget：根据inputcount添加/删除文本输入框
+				function updateInputSocketsVisibility(node, maxInputs) {
+					// 隐藏多余 text_N 的输入端口，显示需要的端口
+					if (!node.inputs || !Array.isArray(node.inputs)) return;
+					for (let i = 0; i < node.inputs.length; i++) {
+						const input = node.inputs[i];
+						if (!input || typeof input.name !== "string") continue;
+						if (input.name.startsWith("text_")) {
+							const num = parseInt(input.name.replace("text_", ""));
+							if (!Number.isNaN(num)) {
+								// 使用type = -1 来隐藏输入端口
+								if (num > maxInputs) {
+									// 断开连接并隐藏
+									if (input.link != null && typeof node.disconnectInput === "function") {
+										node.disconnectInput(i);
+									}
+									input.type = -1;
+								} else {
+									// 恢复正常类型
+									if (input.type === -1) {
+										input.type = "STRING";
+									}
+								}
+							}
+						}
+					}
+				}
+
+				// -------- Widgets 处理 --------
 				function removeExtraTextWidgets(node, maxInputs = 2) {
 					if (!node.widgets) return;
 					
@@ -87,9 +115,10 @@ app.registerExtension({
 					// 简单的widget管理，不触碰输入端口
 					const applyCount = (count) => {
 						console.log("[TextCombineMulti] applyCount", count, this.id);
-						// 只管理widgets
+						// 管理 widgets 与 输入端口可见性
 						removeExtraTextWidgets(this, count);
 						ensureTextWidgets(this, count);
+						updateInputSocketsVisibility(this, count);
 						// 让节点重新计算大小
 						this.setSize?.(this.computeSize?.());
 						this.setDirtyCanvas?.(true, true);
