@@ -8,11 +8,6 @@ app.registerExtension({
 		// 检查是否是TextCombineMulti节点
 		const isTextCombine = nodeData.name === "TextCombineMulti";
 		
-		// 只为TextCombineMulti节点添加调试信息
-		if (isTextCombine) {
-			console.log("[VVL.TextCombineMulti] Found TextCombineMulti node:", nodeData);
-		}
-		
 		if (isTextCombine) {
 				// -------- Widgets 处理 --------
 				function removeExtraTextWidgets(node, maxInputs = 2) {
@@ -83,25 +78,80 @@ app.registerExtension({
 					});
 				}
 
-				// 不需要重写序列化，让ComfyUI自己处理
-
-				// 不需要重写configure方法，让节点自己处理
+				// 重写序列化方法，确保端口类型正确
+				const originalSerialize = nodeType.prototype.serialize;
+				nodeType.prototype.serialize = function() {
+					// 在序列化前，恢复所有端口的正常类型
+					if (this.inputs) {
+						this.inputs.forEach(input => {
+							if (input && input.type === -1) {
+								input.type = "STRING";
+							}
+						});
+					}
+					
+					// 调用原始序列化
+					const result = originalSerialize ? originalSerialize.call(this) : {};
+					
+					// 序列化后，重新应用隐藏
+					const inputCountWidget = this.widgets?.find(w => w.name === "inputcount");
+					if (inputCountWidget && this.applyCountFunction) {
+						// 使用setTimeout确保在序列化完成后执行
+						setTimeout(() => {
+							this.applyCountFunction(inputCountWidget.value, true, true);
+						}, 0);
+					}
+					
+					return result;
+				};
 
 				nodeType.prototype.onNodeCreated = function () {
 					
 					// 动态管理文本widget和输入端口的可见性
 					const updateInputSocketsVisibility = (node, maxInputs) => {
-						// 完全不修改输入端口的属性，只断开多余的连接
+						// 隐藏多余的输入端口并断开连接
 						if (!node.inputs || !Array.isArray(node.inputs)) return;
 						for (let i = 0; i < node.inputs.length; i++) {
 							const input = node.inputs[i];
 							if (!input || typeof input.name !== "string") continue;
 							if (input.name.startsWith("text_")) {
 								const num = parseInt(input.name.replace("text_", ""));
-								if (!Number.isNaN(num) && num > maxInputs) {
-									// 只断开连接，不修改任何端口属性
-									if (input.link != null && typeof node.disconnectInput === "function") {
-										node.disconnectInput(i);
+								if (!Number.isNaN(num)) {
+									if (num > maxInputs) {
+										// 断开连接
+										if (input.link != null && typeof node.disconnectInput === "function") {
+											node.disconnectInput(i);
+										}
+										// 使用type = -1来隐藏端口
+										input.type = -1;
+									} else {
+										// 恢复正常类型
+										if (input.type === -1) {
+											input.type = "STRING";
+										}
+									}
+								}
+							}
+						}
+					};
+					
+					// 只更新端口可见性，不断开连接
+					const updateInputSocketsVisibilityOnly = (node, maxInputs) => {
+						if (!node.inputs || !Array.isArray(node.inputs)) return;
+						for (let i = 0; i < node.inputs.length; i++) {
+							const input = node.inputs[i];
+							if (!input || typeof input.name !== "string") continue;
+							if (input.name.startsWith("text_")) {
+								const num = parseInt(input.name.replace("text_", ""));
+								if (!Number.isNaN(num)) {
+									if (num > maxInputs) {
+										// 只隐藏，不断开连接
+										input.type = -1;
+									} else {
+										// 恢复正常类型
+										if (input.type === -1) {
+											input.type = "STRING";
+										}
 									}
 								}
 							}
@@ -110,7 +160,6 @@ app.registerExtension({
 					
 					// 简单的widget管理
 					const applyCount = (count, preserveConnections = false, skipWidgetRebuild = false) => {
-						console.log("[TextCombineMulti] applyCount", count, this.id, "preserveConnections:", preserveConnections, "skipWidgetRebuild:", skipWidgetRebuild);
 						
 						// 如果不跳过widget重建，则管理widgets
 						if (!skipWidgetRebuild) {
@@ -119,9 +168,13 @@ app.registerExtension({
 							ensureTextWidgets(this, count);
 						}
 						
-						// 只有用户手动修改时才断开连接
+						// 更新端口可见性
 						if (!preserveConnections) {
+							// 用户手动修改时，断开连接并隐藏
 							updateInputSocketsVisibility(this, count);
+						} else {
+							// 恢复时，只隐藏不断开连接
+							updateInputSocketsVisibilityOnly(this, count);
 						}
 						
 						// 让节点重新计算大小
@@ -129,9 +182,9 @@ app.registerExtension({
 						this.setDirtyCanvas?.(true, true);
 					};
 
-
 					// 保存applyCount的引用到节点实例
 					const nodeApplyCount = applyCount;
+					this.applyCountFunction = applyCount;
 					
 					// 重写onConfigure来处理序列化恢复
 					this.onConfigure = function(o) {
@@ -145,8 +198,6 @@ app.registerExtension({
 						
 						// 延迟确保widgets已完全恢复
 						setTimeout(() => {
-							console.log("[TextCombineMulti] onConfigure", this.id, "widgets_values:", o?.widgets_values);
-							
 							// 创建一个临时存储来保存所有值
 							const allValues = {};
 							
@@ -165,14 +216,11 @@ app.registerExtension({
 							
 							// 如果widgets_values存在，尝试更准确地获取inputcount
 							if (o && o.widgets_values && Array.isArray(o.widgets_values)) {
-								console.log("[TextCombineMulti] Searching for inputcount in widgets_values...");
-								
 								// 在widgets_values中查找inputcount值
 								// inputcount是一个数字类型，而且是整数，范围在2-20之间
 								let inputcountIndex = -1;
 								for (let i = 0; i < o.widgets_values.length; i++) {
 									const value = o.widgets_values[i];
-									console.log(`[TextCombineMulti] Index ${i}: value = ${value}, type = ${typeof value}`);
 									
 									// 严格检查：必须是数字类型，整数，且在有效范围内
 									if (typeof value === 'number' && 
@@ -181,7 +229,6 @@ app.registerExtension({
 									    value <= 20) {
 										targetCount = value;
 										inputcountIndex = i;
-										console.log("[TextCombineMulti] Found inputcount at index", i, "value:", value);
 										// 找到第一个符合条件的就是inputcount
 										break;
 									}
@@ -206,8 +253,6 @@ app.registerExtension({
 									allValues.inputcount = targetCount;
 								}
 							}
-							
-							console.log("[TextCombineMulti] Restoring with targetCount:", targetCount, "allValues:", allValues);
 							
 							// 应用正确的布局
 							nodeApplyCount(targetCount, true, false);
