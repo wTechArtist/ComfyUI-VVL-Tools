@@ -132,12 +132,5 @@ class RoomBboxGeneratorNode:
             return (json.dumps(error_data, indent=4, ensure_ascii=False),)
 
 
-# 导出节点类映射
-NODE_CLASS_MAPPINGS = {
-    "RoomBboxGeneratorNode": RoomBboxGeneratorNode
-}
-
-# 节点显示名称映射
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "RoomBboxGeneratorNode": "VVL 3D Room Box Json Generator"
-}
+# 导出类供外部使用
+__all__ = ['RoomBboxGeneratorNode']
