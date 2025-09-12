@@ -460,56 +460,45 @@ print(f"[Blender] 处理完成！")
         file_path = self._generate_unique_filename(download_dir, url)
         
         try:
-            # 创建请求对象，设置User-Agent
-            req = urllib.request.Request(url)
-            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+            import requests
+            import warnings
+            from requests.packages.urllib3.exceptions import InsecureRequestWarning
+            warnings.simplefilter('ignore', InsecureRequestWarning)
+            
+            print(f"[Node] 使用requests库下载...")
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+            }
+            
+            # 检查是否为需要认证的dreammaker域名
+            from urllib.parse import urlparse
+            parsed_url = urlparse(url)
+            if 'dreammaker.netease.com' in parsed_url.netloc:
+                print(f"[Node] 检测到dreammaker域名，添加认证头...")
+                headers['X-Auth-User'] = 'comfyui-dm-user'
+                print(f"[Node] 已添加认证头")
             
             print(f"[Node] 下载到: {file_path}")
+            response = requests.get(url, headers=headers, timeout=300, verify=False)
             
-            # 执行下载
-            with urllib.request.urlopen(req, timeout=300) as response:  # 5分钟超时
-                total_size = response.getheader('Content-Length')
-                if total_size:
-                    total_size = int(total_size)
-                    print(f"[Node] 文件大小: {total_size / (1024*1024):.2f} MB")
-                
-                # 检查Content-Type
-                content_type = response.getheader('Content-Type', '')
-                print(f"[Node] Content-Type: {content_type}")
-                
-                # 分块下载并显示进度
+            if response.status_code == 200:
                 with open(file_path, 'wb') as f:
-                    downloaded = 0
-                    chunk_size = 8192
-                    while True:
-                        chunk = response.read(chunk_size)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        if total_size:
-                            progress = (downloaded / total_size) * 100
-                            if downloaded % (chunk_size * 100) == 0:  # 每800KB显示一次进度
-                                print(f"[Node] 下载进度: {progress:.1f}% ({downloaded / (1024*1024):.2f}/{total_size / (1024*1024):.2f} MB)")
-            
-            print(f"[Node] 下载完成: {file_path}")
-            
-            # 验证文件大小
-            if os.path.getsize(file_path) == 0:
-                raise Exception("下载的文件为空")
-            
-            # 验证文件格式
-            file_ext = os.path.splitext(file_path)[1].lower()
-            if file_ext not in ('.fbx', '.glb', '.gltf'):
-                print(f"[Node] 警告: 下载的文件扩展名 '{file_ext}' 可能不受支持")
-            
-            return file_path
-            
-        except urllib.error.HTTPError as e:
-            raise Exception(f"HTTP错误 {e.code}: {e.reason}。请检查URL是否正确且文件可访问。")
-        except urllib.error.URLError as e:
-            raise Exception(f"URL错误: {e.reason}。请检查网络连接和URL格式。")
+                    f.write(response.content)
+                print(f"[Node] 下载成功: {len(response.content) / (1024*1024):.2f} MB")
+                
+                # 验证文件格式
+                file_ext = os.path.splitext(file_path)[1].lower()
+                if file_ext not in ('.fbx', '.glb', '.gltf'):
+                    print(f"[Node] 警告: 文件扩展名 '{file_ext}' 可能不受支持")
+                
+                return file_path
+            else:
+                raise Exception(f"HTTP错误 {response.status_code}: {response.reason}")
+                
+        except ImportError:
+            raise Exception("需要安装requests库: pip install requests")
         except Exception as e:
             # 清理可能的不完整文件
             if os.path.exists(file_path):
@@ -709,5 +698,3 @@ with open(bbox_path, "w", encoding="utf-8") as f:
         print(f"=== VVL智能模型缩放器 结束 ===\n")
         
         return (out_path, bbox_json, scale_info_json)
-
-# 节点映射在 node_mappings.py 中统一管理
