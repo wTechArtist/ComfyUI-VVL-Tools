@@ -9,6 +9,10 @@ import tempfile
 import subprocess
 import shutil
 import math
+import urllib.request
+import urllib.parse
+import hashlib
+import time
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 import folder_paths
@@ -176,6 +180,9 @@ class BlenderSmartModelScaler:
                 "force_exact_alignment": ("BOOLEAN", {"default": True, "tooltip": "强制精确对齐：启用时允许各轴独立缩放以匹配目标尺寸（可能造成拉伸变形），禁用时保持模型原始比例进行等比缩放"}),
                 "blender_path": ("STRING", {"default": "blender", "tooltip": "Blender 可执行文件路径，默认使用系统PATH中的 'blender' 命令，也可指定完整路径。Windows示例: 'C:/Program Files/Blender Foundation/Blender 4.0/blender.exe'，Linux示例: '/usr/bin/blender' 或 '/opt/blender/blender'"}),
                 "output_name": ("STRING", {"default": "scaled.fbx", "tooltip": "输出文件名，支持 .fbx、.obj、.glb 等格式，文件将保存到 ComfyUI 输出目录的 3d 子文件夹中"}),
+            },
+            "optional": {
+                "model_url": ("STRING", {"forceInput": True, "tooltip": "可选：3D模型下载链接，支持 .fbx、.glb、.gltf 格式。如果提供此参数，mesh_path 将被忽略。模型会下载到 ComfyUI 输出目录的 downloads/3d_models 文件夹中"}),
             }
         }
 
@@ -214,6 +221,25 @@ except Exception as e:
     elif lower.endswith((".glb", ".gltf")):
         bpy.ops.import_scene.gltf(filepath=in_path)
     print(f"[Blender] 使用基本导入模式成功")
+
+# 修复GLB导入后的纹理路径问题（确保FBX导出时纹理正确）
+if lower.endswith((".glb", ".gltf")):
+    print(f"[Blender] 修复GLB纹理路径以确保FBX导出兼容性...")
+    image_counter = 0
+    for img in bpy.data.images:
+        if img.source == 'FILE' and not img.filepath:
+            # 为没有filepath的图像设置一个虚假的路径
+            fake_path = f"texture_{image_counter:03d}.png"
+            img.filepath = fake_path
+            print(f"[Blender] 修复图像路径: {img.name} -> {fake_path}")
+            image_counter += 1
+        elif img.packed_file and not img.filepath:
+            # 对于packed文件，也需要设置路径
+            fake_path = f"packed_texture_{image_counter:03d}.png"
+            img.filepath = fake_path
+            print(f"[Blender] 修复packed图像路径: {img.name} -> {fake_path}")
+            image_counter += 1
+    print(f"[Blender] 纹理路径修复完成，处理了 {image_counter} 个图像")
 
 meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH']
 print(f"[Blender] 找到 {len(meshes)} 个网格对象")
@@ -277,7 +303,7 @@ scale_info = {
     "materials_preserved": False
 }
 
-# 导出 FBX（保留所有材质和贴图信息）
+# 导出模型（保留所有材质和贴图信息）
 print(f"[Blender] 导出到: {out_path}")
 print(f"[Blender] 保留材质和贴图数据...")
 
@@ -311,33 +337,71 @@ with open(bbox_path, "w", encoding="utf-8") as f:
 with open(scale_info_path, "w", encoding="utf-8") as f:
     json.dump(scale_info, f)
 
-# 导出FBX（带错误处理）
-try:
-    print(f"[Blender] 尝试完整导出...")
-    bpy.ops.export_scene.fbx(
-        filepath=out_path,
-        use_selection=False,
-        axis_forward='-Z', 
-        axis_up='Y',
-        path_mode='COPY',      # 复制贴图文件
-        embed_textures=True,   # 嵌入贴图
-        use_custom_props=True, # 保留自定义属性
-        global_scale=1.0
-    )
-    print(f"[Blender] 完整导出成功")
-except Exception as e:
-    print(f"[Blender] 完整导出失败，尝试基本导出: {str(e)}")
+# 根据输出文件格式选择导出器
+out_path_lower = out_path.lower()
+if out_path_lower.endswith(('.glb', '.gltf')):
+    # GLB/GLTF导出
     try:
+        print(f"[Blender] 尝试GLB/GLTF完整导出...")
+        bpy.ops.export_scene.gltf(
+            filepath=out_path,
+            export_format='GLB' if out_path_lower.endswith('.glb') else 'GLTF_SEPARATE',
+            export_texcoords=True,
+            export_normals=True,
+            export_materials='EXPORT',
+            export_colors=True,
+            export_cameras=False,
+            export_extras=True,
+            export_yup=True
+        )
+        print(f"[Blender] GLB/GLTF完整导出成功")
+    except Exception as e:
+        print(f"[Blender] GLB/GLTF完整导出失败，尝试基本导出: {str(e)}")
+        try:
+            bpy.ops.export_scene.gltf(
+                filepath=out_path,
+                export_format='GLB' if out_path_lower.endswith('.glb') else 'GLTF_SEPARATE'
+            )
+            print(f"[Blender] GLB/GLTF基本导出成功")
+        except Exception as e2:
+            print(f"[Blender] GLB/GLTF基本导出也失败: {str(e2)}")
+            raise e2
+else:
+    # FBX导出（带错误处理，针对GLB转换优化）
+    try:
+        print(f"[Blender] 尝试FBX完整导出...")
         bpy.ops.export_scene.fbx(
             filepath=out_path,
             use_selection=False,
             axis_forward='-Z', 
-            axis_up='Y'
+            axis_up='Y',
+            path_mode='COPY',           # 复制贴图文件
+            embed_textures=True,        # 嵌入贴图
+            use_custom_props=True,      # 保留自定义属性
+            use_mesh_modifiers=True,    # 应用修改器
+            use_armature_deform_only=False,  # 包含所有骨骼
+            add_leaf_bones=False,       # 不添加叶子骨骼
+            primary_bone_axis='Y',      # 骨骼轴向
+            secondary_bone_axis='X',    # 次要轴向
+            use_metadata=True,          # 包含元数据
+            global_scale=1.0
         )
-        print(f"[Blender] 基本导出成功")
-    except Exception as e2:
-        print(f"[Blender] 基本导出也失败: {str(e2)}")
-        raise e2
+        print(f"[Blender] FBX完整导出成功")
+    except Exception as e:
+        print(f"[Blender] FBX完整导出失败，尝试基本导出: {str(e)}")
+        try:
+            bpy.ops.export_scene.fbx(
+                filepath=out_path,
+                use_selection=False,
+                axis_forward='-Z', 
+                axis_up='Y',
+                path_mode='COPY',      # 确保基本导出也复制纹理
+                embed_textures=True    # 确保基本导出也嵌入纹理
+            )
+            print(f"[Blender] FBX基本导出成功")
+        except Exception as e2:
+            print(f"[Blender] FBX基本导出也失败: {str(e2)}")
+            raise e2
 
 # 保存结果
 with open(bbox_path, "w", encoding="utf-8") as f:
@@ -352,6 +416,108 @@ print(f"[Blender] 处理完成！")
     def _ensure_blender(self, blender_path: str):
         if shutil.which(blender_path) is None:
             raise Exception(f"找不到 Blender 可执行文件：{blender_path}。请将 Blender 加入 PATH，或在本节点里填写绝对路径。")
+
+    def _generate_unique_filename(self, base_dir: str, url: str) -> str:
+        """生成唯一的文件名，避免文件覆盖"""
+        parsed_url = urllib.parse.urlparse(url)
+        original_filename = os.path.basename(parsed_url.path)
+        
+        # 如果URL没有文件名，尝试从Content-Disposition获取
+        if not original_filename or '.' not in original_filename:
+            original_filename = "model.fbx"  # 默认文件名
+        
+        # 确保文件扩展名正确
+        file_ext = os.path.splitext(original_filename)[1].lower()
+        if file_ext not in ('.fbx', '.glb', '.gltf'):
+            # 尝试从URL的query参数或headers中推断格式
+            if 'fbx' in url.lower():
+                file_ext = '.fbx'
+            elif 'glb' in url.lower():
+                file_ext = '.glb'
+            elif 'gltf' in url.lower():
+                file_ext = '.gltf'
+            else:
+                file_ext = '.fbx'  # 默认为FBX
+        
+        base_name = os.path.splitext(original_filename)[0]
+        
+        # 生成时间戳和URL哈希来确保唯一性
+        timestamp = str(int(time.time()))
+        url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:8]
+        unique_name = f"{base_name}_{timestamp}_{url_hash}{file_ext}"
+        
+        return os.path.join(base_dir, unique_name)
+
+    def _download_model(self, url: str) -> str:
+        """从URL下载3D模型文件"""
+        print(f"[Node] 开始下载模型: {url}")
+        
+        # 创建下载目录
+        download_dir = os.path.join(folder_paths.get_output_directory(), "downloads", "3d_models")
+        os.makedirs(download_dir, exist_ok=True)
+        
+        # 生成唯一的文件路径
+        file_path = self._generate_unique_filename(download_dir, url)
+        
+        try:
+            # 创建请求对象，设置User-Agent
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+            
+            print(f"[Node] 下载到: {file_path}")
+            
+            # 执行下载
+            with urllib.request.urlopen(req, timeout=300) as response:  # 5分钟超时
+                total_size = response.getheader('Content-Length')
+                if total_size:
+                    total_size = int(total_size)
+                    print(f"[Node] 文件大小: {total_size / (1024*1024):.2f} MB")
+                
+                # 检查Content-Type
+                content_type = response.getheader('Content-Type', '')
+                print(f"[Node] Content-Type: {content_type}")
+                
+                # 分块下载并显示进度
+                with open(file_path, 'wb') as f:
+                    downloaded = 0
+                    chunk_size = 8192
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        if total_size:
+                            progress = (downloaded / total_size) * 100
+                            if downloaded % (chunk_size * 100) == 0:  # 每800KB显示一次进度
+                                print(f"[Node] 下载进度: {progress:.1f}% ({downloaded / (1024*1024):.2f}/{total_size / (1024*1024):.2f} MB)")
+            
+            print(f"[Node] 下载完成: {file_path}")
+            
+            # 验证文件大小
+            if os.path.getsize(file_path) == 0:
+                raise Exception("下载的文件为空")
+            
+            # 验证文件格式
+            file_ext = os.path.splitext(file_path)[1].lower()
+            if file_ext not in ('.fbx', '.glb', '.gltf'):
+                print(f"[Node] 警告: 下载的文件扩展名 '{file_ext}' 可能不受支持")
+            
+            return file_path
+            
+        except urllib.error.HTTPError as e:
+            raise Exception(f"HTTP错误 {e.code}: {e.reason}。请检查URL是否正确且文件可访问。")
+        except urllib.error.URLError as e:
+            raise Exception(f"URL错误: {e.reason}。请检查网络连接和URL格式。")
+        except Exception as e:
+            # 清理可能的不完整文件
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+            raise Exception(f"下载失败: {str(e)}")
 
     def _get_model_bbox(self, mesh_path: str, blender_path: str) -> Vector3:
         """获取模型的初始包围盒尺寸"""
@@ -405,15 +571,35 @@ with open(bbox_path, "w", encoding="utf-8") as f:
                 return Vector3(size[0], size[1], size[2])
 
     def process(self, mesh_path: str, target_size_x: float, target_size_y: float, target_size_z: float, 
-                force_exact_alignment: bool, blender_path: str, output_name: str):
+                force_exact_alignment: bool, blender_path: str, output_name: str, model_url: str = ""):
         
         print(f"\n=== VVL智能模型缩放器 开始处理 ===")
-        print(f"[Node] 输入模型: {mesh_path}")
+        
+        # 处理模型输入：优先使用URL下载
+        actual_mesh_path = mesh_path
+        if model_url and model_url.strip():
+            print(f"[Node] 检测到模型URL，将下载: {model_url}")
+            try:
+                actual_mesh_path = self._download_model(model_url.strip())
+                print(f"[Node] URL下载成功，使用下载的模型: {actual_mesh_path}")
+            except Exception as e:
+                raise Exception(f"模型下载失败: {str(e)}")
+        else:
+            print(f"[Node] 使用本地模型: {mesh_path}")
+            if not mesh_path or not mesh_path.strip():
+                raise Exception("请提供 mesh_path 或 model_url 参数")
+            actual_mesh_path = mesh_path
+        
+        print(f"[Node] 最终使用的模型: {actual_mesh_path}")
         print(f"[Node] 目标尺寸: ({target_size_x:.1f}, {target_size_y:.1f}, {target_size_z:.1f})")
         print(f"[Node] 强制精确对齐: {force_exact_alignment}")
         print(f"[Node] 缩放将烘焙到顶点")
         
-        ext = os.path.splitext(mesh_path)[1].lower()
+        # 验证模型文件
+        if not os.path.exists(actual_mesh_path):
+            raise Exception(f"模型文件不存在: {actual_mesh_path}")
+        
+        ext = os.path.splitext(actual_mesh_path)[1].lower()
         if ext not in (".fbx", ".glb", ".gltf"):
             raise Exception("仅支持 .fbx / .glb / .gltf 输入。")
 
@@ -421,12 +607,12 @@ with open(bbox_path, "w", encoding="utf-8") as f:
 
         # 获取模型初始包围盒
         print(f"[Node] 获取模型初始包围盒...")
-        initial_bbox = self._get_model_bbox(mesh_path, blender_path)
+        initial_bbox = self._get_model_bbox(actual_mesh_path, blender_path)
         print(f"[Node] 初始包围盒尺寸: ({initial_bbox.x:.2f}, {initial_bbox.y:.2f}, {initial_bbox.z:.2f})")
         
         # 计算智能缩放因子
         print(f"[Node] 计算智能缩放因子...")
-        model_name = os.path.splitext(os.path.basename(mesh_path))[0]
+        model_name = os.path.splitext(os.path.basename(actual_mesh_path))[0]
         
         model_info = ModelInfo(
             name=model_name,
@@ -464,7 +650,7 @@ with open(bbox_path, "w", encoding="utf-8") as f:
             cmd = [
                 blender_path, "-b", "-noaudio",
                 "--python", script_path, "--",
-                mesh_path, out_path,
+                actual_mesh_path, out_path,
                 str(final_scale.x), str(final_scale.y), str(final_scale.z),
                 bbox_path, scale_info_path
             ]
@@ -501,6 +687,14 @@ with open(bbox_path, "w", encoding="utf-8") as f:
                 "force_exact_alignment": force_exact_alignment,
                 "initial_bbox": [initial_bbox.x, initial_bbox.y, initial_bbox.z],
                 "calculated_scale": [final_scale.x, final_scale.y, final_scale.z]
+            }
+            
+            # 添加输入源信息
+            scale_info_data["input_info"] = {
+                "source_type": "url_download" if (model_url and model_url.strip()) else "local_file",
+                "original_mesh_path": mesh_path,
+                "actual_mesh_path": actual_mesh_path,
+                "model_url": model_url.strip() if model_url else None
             }
             
             # 打印材质信息
