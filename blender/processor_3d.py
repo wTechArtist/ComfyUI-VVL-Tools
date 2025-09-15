@@ -13,6 +13,7 @@ import urllib.request
 import urllib.parse
 import hashlib
 import time
+import re
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 import folder_paths
@@ -625,7 +626,14 @@ with open(bbox_path, "w", encoding="utf-8") as f:
         print(f"[Node] 应用缩放并生成模型...")
         out_dir = os.path.join(folder_paths.get_output_directory(), "3d")
         os.makedirs(out_dir, exist_ok=True)
+        
+        # 处理输出路径，确保目录存在
         out_path = os.path.join(out_dir, output_name)
+        out_path = os.path.normpath(out_path)  # 规范化路径，统一使用系统的路径分隔符
+        
+        # 确保输出目录存在
+        out_dir_for_file = os.path.dirname(out_path)
+        os.makedirs(out_dir_for_file, exist_ok=True)
 
         # 写入临时的 Blender 脚本与输出路径
         with tempfile.TemporaryDirectory() as td:
@@ -698,3 +706,282 @@ with open(bbox_path, "w", encoding="utf-8") as f:
         print(f"=== VVL智能模型缩放器 结束 ===\n")
         
         return (out_path, bbox_json, scale_info_json)
+
+
+class BlenderSmartModelScalerBatch:
+    """
+    VVL智能3D模型批量缩放器
+    从JSON输入中批量处理多个3D模型，支持多线程并行处理
+    
+    输入：包含objects数组的JSON，每个object需要包含name、scale和3d_url字段
+    输出：保持原始JSON结构完全不变，仅将3d_url替换为处理后的本地文件路径
+    
+    特性：
+    - 保留JSON中的所有原始字段和结构，不添加任何额外字段
+    - 仅更新成功处理的对象的3d_url为本地文件路径
+    - 处理失败的对象保持原始3d_url不变
+    - 支持任意字段（如camera、subject、task_id、position、rotation等）
+    - 每个对象输出到独立子目录（batch_3d/obj_XXX/），避免贴图文件冲突
+    - 默认使用2个并行线程以确保贴图处理稳定性
+    - 完全保留模型的材质和贴图信息
+    
+    输出目录结构：
+    ComfyUI/output/3d/batch_3d/
+    ├── obj_000/
+    │   ├── 000_模型名称.fbx
+    │   └── textures/
+    ├── obj_001/
+    │   ├── 001_模型名称.fbx
+    │   └── textures/
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "json_text": ("STRING", {"multiline": True, "default": "", "tooltip": "包含objects数组的JSON数据，每个object包含name、scale和3d_url字段"}),
+                "force_exact_alignment": ("BOOLEAN", {"default": True, "tooltip": "强制精确对齐：启用时允许各轴独立缩放以匹配目标尺寸（可能造成拉伸变形），禁用时保持模型原始比例进行等比缩放"}),
+                "blender_path": ("STRING", {"default": "blender", "tooltip": "Blender 可执行文件路径，默认使用系统PATH中的 'blender' 命令，也可指定完整路径"}),
+            },
+            "optional": {
+                "max_workers": ("INT", {"default": 4, "min": 1, "max": 32, "tooltip": "最大并行处理线程数。每个模型有独立输出目录，理论上支持高并发。建议根据CPU核心数和内存大小调整"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("result_json",)
+    FUNCTION = "process_batch"
+    CATEGORY = "VVL/3D"
+
+    def __init__(self):
+        # 创建单个模型处理器实例，复用其方法
+        self.single_processor = BlenderSmartModelScaler()
+        
+    def _extract_file_extension(self, url: str) -> str:
+        """从URL中提取文件扩展名"""
+        parsed_url = urllib.parse.urlparse(url)
+        path = parsed_url.path
+        
+        # 获取文件名
+        filename = os.path.basename(path)
+        
+        # 提取扩展名
+        ext = os.path.splitext(filename)[1].lower()
+        
+        # 确保扩展名有效
+        if ext not in ['.fbx', '.glb', '.gltf', '.obj']:
+            # 尝试从URL推断
+            if 'fbx' in url.lower():
+                ext = '.fbx'
+            elif 'glb' in url.lower():
+                ext = '.glb'
+            elif 'gltf' in url.lower():
+                ext = '.gltf'
+            else:
+                ext = '.glb'  # 默认使用GLB
+                
+        return ext
+    
+    def _process_single_object(self, obj_data: dict, index: int, force_exact_alignment: bool, 
+                              blender_path: str) -> dict:
+        """处理单个对象"""
+        result = {
+            "index": index,
+            "name": obj_data.get("name", f"object_{index}"),
+            "success": False,
+            "error": None,
+            "output_path": None,
+            "bbox": None,
+            "scale_info": None
+        }
+        
+        try:
+            # 获取必要的字段
+            name = obj_data.get("name", f"object_{index}")
+            scale = obj_data.get("scale", [1.0, 1.0, 1.0])
+            url = obj_data.get("3d_url", "")
+            
+            if not url:
+                raise Exception(f"对象 '{name}' 缺少3d_url字段")
+                
+            if not isinstance(scale, list) or len(scale) < 3:
+                raise Exception(f"对象 '{name}' 的scale字段格式错误，期望[x, y, z]")
+            
+            # 提取文件扩展名
+            file_ext = self._extract_file_extension(url)
+            
+            # 生成输出文件名（使用索引确保唯一性）
+            safe_name = re.sub(r'[^\w\-_\. ]', '_', name)  # 清理文件名中的特殊字符
+            output_filename = f"{index:03d}_{safe_name}{file_ext}"
+            
+            # 设置目标尺寸（scale值乘以100作为基准尺寸）
+            target_size_x = float(scale[0]) * 100.0
+            target_size_y = float(scale[1]) * 100.0
+            target_size_z = float(scale[2]) * 100.0
+            
+            print(f"\n[Batch] 处理对象 [{index}] '{name}':")
+            print(f"  - URL: {url}")
+            print(f"  - 目标缩放: {scale}")
+            print(f"  - 输出文件: {output_filename}")
+            print(f"  - 文件格式: {file_ext}")
+            
+            # 调用单个模型处理器
+            try:
+                # 为每个处理生成唯一的输出子目录，避免贴图文件冲突
+                # 使用固定的目录名，不使用时间戳，以确保路径一致性
+                unique_subdir = os.path.join("batch_3d", f"obj_{index:03d}")
+                output_name_with_subdir = os.path.join(unique_subdir, output_filename)
+                
+                mesh_path, bbox_json, scale_info_json = self.single_processor.process(
+                    mesh_path="",  # 不使用本地路径
+                    target_size_x=target_size_x,
+                    target_size_y=target_size_y,
+                    target_size_z=target_size_z,
+                    force_exact_alignment=force_exact_alignment,
+                    blender_path=blender_path,
+                    output_name=output_name_with_subdir,
+                    model_url=url
+                )
+                
+                result["success"] = True
+                result["output_path"] = mesh_path
+                result["bbox"] = json.loads(bbox_json)
+                result["scale_info"] = json.loads(scale_info_json)
+                
+                # 打印输出路径信息
+                print(f"[Batch] 对象 [{index}] 处理成功")
+                print(f"  - 输出路径: {mesh_path}")
+                print(f"  - 文件存在: {os.path.exists(mesh_path)}")
+                
+                # 打印贴图处理信息
+                scale_info = json.loads(scale_info_json)
+                if scale_info.get("texture_count", 0) > 0:
+                    print(f"  - 贴图数量: {scale_info['texture_count']}")
+                
+            except Exception as e:
+                result["error"] = str(e)
+                print(f"[Batch] 对象 [{index}] '{name}' 处理失败: {str(e)}")
+                
+        except Exception as e:
+            result["error"] = str(e)
+            print(f"[Batch] 对象 [{index}] 处理失败: {str(e)}")
+            
+        return result
+    
+    def process_batch(self, json_text: str, force_exact_alignment: bool, blender_path: str, 
+                     max_workers: int = 4, **kwargs):
+        """批量处理JSON中的所有3D模型"""
+        
+        print(f"\n=== VVL智能模型批量缩放器 开始处理 ===")
+        print(f"[Batch] 最大并行线程数: {max_workers}")
+        
+        try:
+            # 解析JSON输入
+            data = json.loads(json_text)
+            
+            # 检查objects字段
+            if 'objects' not in data or not isinstance(data['objects'], list):
+                raise Exception("JSON必须包含'objects'数组")
+                
+            objects = data['objects']
+            if not objects:
+                raise Exception("objects数组为空")
+                
+            print(f"[Batch] 找到 {len(objects)} 个待处理对象")
+            
+            # 创建基础输出目录
+            base_output_dir = os.path.join(folder_paths.get_output_directory(), "3d")
+            os.makedirs(base_output_dir, exist_ok=True)
+            print(f"[Batch] 基础输出目录: {base_output_dir}")
+            print(f"[Batch] 每个对象将创建独立子目录以避免贴图冲突")
+            
+            # 验证Blender路径
+            self.single_processor._ensure_blender(blender_path)
+            
+            # 使用线程池进行并行处理
+            import concurrent.futures
+            
+            results = []
+            start_time = time.time()
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 提交所有任务
+                future_to_index = {}
+                for index, obj in enumerate(objects):
+                    future = executor.submit(
+                        self._process_single_object,
+                        obj,
+                        index,
+                        force_exact_alignment,
+                        blender_path
+                    )
+                    future_to_index[future] = index
+                
+                # 获取结果
+                for future in concurrent.futures.as_completed(future_to_index):
+                    result = future.result()
+                    results.append(result)
+                    
+                    # 打印进度
+                    completed = len(results)
+                    print(f"[Batch] 进度: {completed}/{len(objects)} ({completed/len(objects)*100:.1f}%)")
+            
+            # 按索引排序结果
+            results.sort(key=lambda x: x['index'])
+            
+            # 统计处理结果
+            success_count = sum(1 for r in results if r['success'])
+            failed_count = len(results) - success_count
+            elapsed_time = time.time() - start_time
+            
+            # 深拷贝原始数据，保持结构不变
+            import copy
+            output_data = copy.deepcopy(data)
+            
+            # 更新每个成功处理的对象的3d_url字段
+            for result in results:
+                if result['success'] and result['output_path']:
+                    index = result['index']
+                    if 0 <= index < len(output_data['objects']):
+                        # 只更新3d_url字段，保留其他所有字段
+                        output_data['objects'][index]['3d_url'] = result['output_path']
+                        
+                        # 可选：添加处理信息到对象（如果需要的话）
+                        # output_data['objects'][index]['_processing_info'] = {
+                        #     'bbox': result['bbox'],
+                        #     'scale_info': result['scale_info']
+                        # }
+            
+            # 不添加任何额外字段，保持原始JSON结构
+            
+            result_json = json.dumps(output_data, ensure_ascii=False, indent=2)
+            
+            # 打印处理摘要
+            print(f"\n[Batch] 处理完成:")
+            print(f"  - 总计: {len(objects)} 个对象")
+            print(f"  - 成功: {success_count} 个")
+            print(f"  - 失败: {failed_count} 个")
+            print(f"  - 耗时: {elapsed_time:.2f} 秒")
+            print(f"  - 平均: {elapsed_time/len(objects):.2f} 秒/对象")
+            
+            # 打印失败的对象信息
+            failed_objects = [r for r in results if not r['success']]
+            if failed_objects:
+                print(f"\n[Batch] 失败的对象:")
+                for fail in failed_objects:
+                    print(f"  - [{fail['index']}] {fail['name']}: {fail['error']}")
+            
+            print(f"=== VVL智能模型批量缩放器 结束 ===\n")
+            
+            return (result_json,)
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON解析错误: {str(e)}"
+            print(f"[Batch] 错误: {error_msg}")
+            error_result = {"error": error_msg}
+            return (json.dumps(error_result, ensure_ascii=False),)
+            
+        except Exception as e:
+            error_msg = f"批量处理失败: {str(e)}"
+            print(f"[Batch] 错误: {error_msg}")
+            error_result = {"error": error_msg}
+            return (json.dumps(error_result, ensure_ascii=False),)

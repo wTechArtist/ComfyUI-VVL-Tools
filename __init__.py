@@ -76,8 +76,9 @@ NODE_CLASS_MAPPINGS = {
     "VVL_Load_Text_Batch": VVL_Load_Text_Batch,
     "TextCombineMulti": TextCombineMulti,
     
-    # Blender节点 (1个)
+    # Blender节点 (2个)
     "BlenderSmartModelScaler": BlenderSmartModelScaler,
+    "BlenderSmartModelScalerBatch": BlenderSmartModelScalerBatch,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -129,6 +130,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     
     # Blender节点
     "BlenderSmartModelScaler": "VVL Blender Smart Model Scaler",
+    "BlenderSmartModelScalerBatch": "VVL Blender Smart Model Scaler Batch",
 }
 
 print("------------------------------------------")    
