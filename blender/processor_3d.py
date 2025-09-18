@@ -194,7 +194,7 @@ class BlenderSmartModelScaler:
 
     BLENDER_SCRIPT = r"""
 import bpy, sys, json, math
-from mathutils import Vector
+from mathutils import Vector, Matrix
 
 argv = sys.argv[sys.argv.index("--")+1:]
 in_path, out_path, sx, sy, sz, bbox_path, scale_info_path = argv
@@ -714,16 +714,32 @@ class BlenderSmartModelScalerBatch:
     从JSON输入中批量处理多个3D模型，支持多线程并行处理
     
     输入：包含objects数组的JSON，每个object需要包含name、scale和3d_url字段
-    输出：保持原始JSON结构完全不变，仅将3d_url替换为处理后的本地文件路径
+    输出：保持原始JSON结构，更新3d_url为处理后的本地文件路径，更新rotation为计算得到的对齐旋转值
     
     特性：
-    - 保留JSON中的所有原始字段和结构，不添加任何额外字段
-    - 仅更新成功处理的对象的3d_url为本地文件路径
-    - 处理失败的对象保持原始3d_url不变
-    - 支持任意字段（如camera、subject、task_id、position、rotation等）
+    - 保留JSON中的所有原始字段和结构
+    - 更新成功处理的对象的3d_url为本地文件路径
+    - 自动计算模型对齐旋转，并更新rotation字段为[x, y, z]度数
+    - 处理失败的对象保持原始字段不变
+    - 支持任意字段（如camera、subject、task_id、position等）
     - 每个对象输出到独立子目录（batch_3d/obj_XXX/），避免贴图文件冲突
-    - 默认使用2个并行线程以确保贴图处理稳定性
+    - 默认使用4个并行线程以平衡处理速度和稳定性
     - 完全保留模型的材质和贴图信息
+    - 使用最薄轴对齐算法，将模型的三个维度按大小匹配到参考box的对应维度
+    
+    对齐算法说明：
+    - 参考模型：在Blender中创建一个标准立方体(size=2)，应用JSON中的scale和rotation值
+    - 例如：scale=[1,2,3], rotation=[90,-65,0] → 创建的Box会同时具有缩放和旋转
+    - Blender会自动计算出旋转后的dimensions（考虑了旋转对包围盒的影响）
+    - 目标模型：输入的3D模型
+    - 算法：
+      1. 将参考Box和目标模型的dimensions从小到大排序
+      2. 建立轴映射关系（最小→最小，中等→中等，最大→最大）
+      3. 检查是否已经对齐（轴映射为恒等映射X→X, Y→Y, Z→Z）
+      4. 如果已对齐，保留原始rotation值；否则计算所需的旋转
+    - 结果：
+      - 已对齐的模型：完全保留原始rotation字段不变（无论是什么值或是否存在）
+      - 需要对齐的模型：rotation字段更新为计算得到的旋转角度[x°, y°, z°]
     
     输出目录结构：
     ComfyUI/output/3d/batch_3d/
@@ -734,6 +750,322 @@ class BlenderSmartModelScalerBatch:
     │   ├── 001_模型名称.fbx
     │   └── textures/
     """
+    
+    # 包含对齐功能的 Blender 脚本
+    BLENDER_SCRIPT_WITH_ALIGNMENT = r"""
+import bpy, sys, json, math
+from mathutils import Vector, Matrix
+
+# 数值稳定性阈值
+_EPS = 1e-8
+
+argv = sys.argv[sys.argv.index("--")+1:]
+in_path, out_path, sx, sy, sz, ref_scale_x, ref_scale_y, ref_scale_z, ref_rot_x, ref_rot_y, ref_rot_z, bbox_path, scale_info_path, alignment_path = argv
+sx, sy, sz = float(sx), float(sy), float(sz)
+ref_scale_x, ref_scale_y, ref_scale_z = float(ref_scale_x), float(ref_scale_y), float(ref_scale_z)  # 参考box的scale值
+ref_rot_x, ref_rot_y, ref_rot_z = float(ref_rot_x), float(ref_rot_y), float(ref_rot_z)  # 参考box的rotation值（度）
+
+print(f"[Blender] 开始处理模型: {in_path}")
+print(f"[Blender] 应用缩放: sx={sx:.3f}, sy={sy:.3f}, sz={sz:.3f}")
+print(f"[Blender] 参考Box的Scale: ({ref_scale_x:.1f}, {ref_scale_y:.1f}, {ref_scale_z:.1f})")
+print(f"[Blender] 参考Box的Rotation: ({ref_rot_x:.1f}°, {ref_rot_y:.1f}°, {ref_rot_z:.1f}°)")
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+
+# 导入模型
+lower = in_path.lower()
+print(f"[Blender] 导入文件类型: {lower}")
+try:
+    if lower.endswith(".fbx"):
+        bpy.ops.import_scene.fbx(filepath=in_path, global_scale=1.0, axis_forward='-Z', axis_up='Y',
+                                use_image_search=True, use_custom_props=True)
+    elif lower.endswith((".glb", ".gltf")):
+        bpy.ops.import_scene.gltf(filepath=in_path, import_pack_images=True)
+    print(f"[Blender] 导入成功")
+except Exception as e:
+    print(f"[Blender] 导入警告: {str(e)}")
+    if lower.endswith(".fbx"):
+        bpy.ops.import_scene.fbx(filepath=in_path)
+    elif lower.endswith((".glb", ".gltf")):
+        bpy.ops.import_scene.gltf(filepath=in_path)
+    print(f"[Blender] 使用基本导入模式成功")
+
+# 修复GLB导入后的纹理路径问题
+if lower.endswith((".glb", ".gltf")):
+    print(f"[Blender] 修复GLB纹理路径...")
+    image_counter = 0
+    for img in bpy.data.images:
+        if img.source == 'FILE' and not img.filepath:
+            fake_path = f"texture_{image_counter:03d}.png"
+            img.filepath = fake_path
+            image_counter += 1
+        elif img.packed_file and not img.filepath:
+            fake_path = f"packed_texture_{image_counter:03d}.png"
+            img.filepath = fake_path
+            image_counter += 1
+    print(f"[Blender] 纹理路径修复完成，处理了 {image_counter} 个图像")
+
+meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH']
+print(f"[Blender] 找到 {len(meshes)} 个网格对象")
+
+# 计算原始包围盒
+original_gmin = Vector(( math.inf,  math.inf,  math.inf))
+original_gmax = Vector((-math.inf, -math.inf, -math.inf))
+for o in meshes:
+    for corner in o.bound_box:
+        wpt = o.matrix_world @ Vector(corner)
+        original_gmin.x = min(original_gmin.x, wpt.x)
+        original_gmin.y = min(original_gmin.y, wpt.y)
+        original_gmin.z = min(original_gmin.z, wpt.z)
+        original_gmax.x = max(original_gmax.x, wpt.x)
+        original_gmax.y = max(original_gmax.y, wpt.y)
+        original_gmax.z = max(original_gmax.z, wpt.z)
+
+original_size = [original_gmax[i] - original_gmin[i] for i in range(3)]
+print(f"[Blender] 原始包围盒尺寸: ({original_size[0]:.2f}, {original_size[1]:.2f}, {original_size[2]:.2f})")
+
+# ===== 对齐计算开始 =====
+print(f"\n[Blender] 开始计算对齐旋转...")
+
+# 创建参考 Box
+print(f"[Blender] 创建参考 Box...")
+# 创建默认大小的立方体
+bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+ref_box = bpy.context.active_object
+ref_box.name = "Reference_Box"
+
+# 直接应用 scale 值（与JSON中的scale字段对应）
+ref_box.scale = (ref_scale_x, ref_scale_y, ref_scale_z)
+
+# 应用rotation值（需要转换为弧度）
+ref_box.rotation_euler = (math.radians(ref_rot_x), math.radians(ref_rot_y), math.radians(ref_rot_z))
+
+bpy.context.view_layer.update()
+
+# 获取参考 Box 的实际 dimensions
+ref_dims = ref_box.dimensions.copy()
+ref_sizes = [ref_dims.x, ref_dims.y, ref_dims.z]
+
+print(f"[Blender] 参考 Box 创建完成:")
+print(f"  - Scale: ({ref_scale_x}, {ref_scale_y}, {ref_scale_z})")
+print(f"  - Rotation: ({ref_rot_x}°, {ref_rot_y}°, {ref_rot_z}°)")
+print(f"  - 实际 Dimensions: ({ref_sizes[0]:.2f}, {ref_sizes[1]:.2f}, {ref_sizes[2]:.2f})")
+
+# 获取参考 Box 的旋转矩阵（在删除之前）
+ref_loc, ref_rot, ref_scale = ref_box.matrix_world.decompose()
+ref_rot_matrix = ref_rot.to_matrix()
+
+# 获取目标模型的尺寸（当前模型）
+tgt_sizes = original_size
+
+# 删除参考 Box（我们已经获取了需要的信息）
+bpy.data.objects.remove(ref_box, do_unlink=True)
+
+# 对尺寸进行排序，得到从小到大的轴索引
+ref_sorted_indices = sorted(range(3), key=lambda i: ref_sizes[i])  # [最小轴, 中轴, 最大轴]
+tgt_sorted_indices = sorted(range(3), key=lambda i: tgt_sizes[i])
+
+# 创建轴映射：目标的第i个轴应该映射到参考的第j个轴
+axis_mapping = [None, None, None]
+for rank in range(3):  # rank: 0=最小, 1=中等, 2=最大
+    tgt_axis = tgt_sorted_indices[rank]
+    ref_axis = ref_sorted_indices[rank]
+    axis_mapping[tgt_axis] = ref_axis
+
+print(f"  参考box尺寸: X={ref_sizes[0]:.1f} Y={ref_sizes[1]:.1f} Z={ref_sizes[2]:.1f}")
+print(f"  目标模型尺寸: X={tgt_sizes[0]:.1f} Y={tgt_sizes[1]:.1f} Z={tgt_sizes[2]:.1f}")
+print(f"  参考轴排序: {['XYZ'[i] for i in ref_sorted_indices]} (小→大)")
+print(f"  目标轴排序: {['XYZ'[i] for i in tgt_sorted_indices]} (小→大)")
+print(f"  轴映射: X→{'XYZ'[axis_mapping[0]]}, Y→{'XYZ'[axis_mapping[1]]}, Z→{'XYZ'[axis_mapping[2]]}")
+
+# 检查是否已经对齐（恒等映射）
+is_already_aligned = (axis_mapping[0] == 0 and axis_mapping[1] == 1 and axis_mapping[2] == 2)
+if is_already_aligned:
+    print(f"  [对齐检查] 模型已经与参考box平行对齐，无需旋转！")
+
+# 如果已经对齐，直接设置为无旋转
+if is_already_aligned:
+    rotation_degrees = [0.0, 0.0, 0.0]
+    rotation_radians = [0.0, 0.0, 0.0]
+    print(f"  计算的旋转角度: X=0.0° Y=0.0° Z=0.0° (保持原始方向)")
+else:
+    # 基于轴映射构建旋转矩阵
+    # 创建一个置换矩阵
+    perm_matrix = Matrix((
+        (0, 0, 0),
+        (0, 0, 0),
+        (0, 0, 0)
+    ))
+
+    # 设置置换：目标轴i应该去到参考轴axis_mapping[i]的位置
+    for i in range(3):
+        perm_matrix[axis_mapping[i]][i] = 1.0
+
+    # 检查行列式，确保是旋转而非镜像
+    det = perm_matrix.determinant()
+    if det < 0:
+        # 如果是负的，需要翻转一个轴
+        last_mapping = axis_mapping[2]
+        perm_matrix[last_mapping][2] *= -1
+
+    print(f"  置换矩阵: \n{perm_matrix}")
+
+    # 最终旋转 = 参考旋转 × 置换旋转
+    # ref_rot_matrix 已经在前面获取了（包含了参考Box的旋转）
+    final_rotation_matrix = ref_rot_matrix @ perm_matrix
+
+    # 转换为欧拉角（度）
+    euler = final_rotation_matrix.to_euler()
+    rotation_degrees = [math.degrees(euler.x), math.degrees(euler.y), math.degrees(euler.z)]
+    rotation_radians = [euler.x, euler.y, euler.z]
+
+    print(f"  计算的旋转角度: X={rotation_degrees[0]:.1f}° Y={rotation_degrees[1]:.1f}° Z={rotation_degrees[2]:.1f}°")
+
+# 保存对齐信息
+alignment_info = {
+    "rotation_degrees": rotation_degrees,
+    "rotation_radians": rotation_radians,
+    "axis_mapping": {
+        "X": "XYZ"[axis_mapping[0]],
+        "Y": "XYZ"[axis_mapping[1]],
+        "Z": "XYZ"[axis_mapping[2]]
+    },
+    "ref_box": {
+        "scale": [ref_scale_x, ref_scale_y, ref_scale_z],
+        "rotation": [ref_rot_x, ref_rot_y, ref_rot_z],
+        "dimensions": ref_sizes
+    },
+    "model_sizes": tgt_sizes,
+    "is_already_aligned": is_already_aligned
+}
+
+# 只有在需要旋转时才添加置换矩阵信息
+if not is_already_aligned:
+    alignment_info["permutation_matrix"] = [[perm_matrix[i][j] for j in range(3)] for i in range(3)]
+
+# ===== 对齐计算结束 =====
+
+# 应用缩放（但不应用旋转）
+for o in meshes:
+    o.select_set(True)
+    original_scale = o.scale.copy()
+    o.scale = (o.scale[0]*sx, o.scale[1]*sy, o.scale[2]*sz)
+    print(f"[Blender] 对象 '{o.name}' 缩放: {original_scale} -> {o.scale}")
+
+# 烘焙缩放到顶点
+bpy.context.view_layer.objects.active = meshes[0] if meshes else None
+if meshes:
+    print(f"[Blender] 烘焙缩放到顶点...")
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+# 计算缩放后的全局 AABB
+gmin = Vector(( math.inf,  math.inf,  math.inf))
+gmax = Vector((-math.inf, -math.inf, -math.inf))
+for o in meshes:
+    for corner in o.bound_box:
+        wpt = o.matrix_world @ Vector(corner)
+        gmin.x = min(gmin.x, wpt.x)
+        gmin.y = min(gmin.y, wpt.y)
+        gmin.z = min(gmin.z, wpt.z)
+        gmax.x = max(gmax.x, wpt.x)
+        gmax.y = max(gmax.y, wpt.y)
+        gmax.z = max(gmax.z, wpt.z)
+
+final_size = [gmax[i] - gmin[i] for i in range(3)]
+print(f"[Blender] 缩放后包围盒尺寸: ({final_size[0]:.2f}, {final_size[1]:.2f}, {final_size[2]:.2f})")
+
+# 准备输出数据
+bbox = {"min":[gmin.x,gmin.y,gmin.z], "max":[gmax.x,gmax.y,gmax.z], "size": final_size}
+material_count = 0
+texture_count = 0
+
+# 检查材质信息
+try:
+    for obj in meshes:
+        if obj.data.materials:
+            material_count += len(obj.data.materials)
+            for mat in obj.data.materials:
+                if mat and hasattr(mat, 'use_nodes') and mat.use_nodes and hasattr(mat, 'node_tree'):
+                    for node in mat.node_tree.nodes:
+                        if node.type == 'TEX_IMAGE' and hasattr(node, 'image') and node.image:
+                            texture_count += 1
+except Exception as e:
+    print(f"[Blender] 材质检查警告: {str(e)}")
+
+scale_info = {
+    "applied_scale": [sx, sy, sz],
+    "original_size": original_size,
+    "final_size": final_size,
+    "size_change_ratio": [final_size[i]/original_size[i] if original_size[i] > 0 else 1.0 for i in range(3)],
+    "mesh_count": len(meshes),
+    "scale_applied_to_vertices": True,
+    "material_count": material_count,
+    "texture_count": texture_count,
+    "materials_preserved": (texture_count > 0 or material_count > 0)
+}
+
+# 保存临时结果
+with open(bbox_path, "w", encoding="utf-8") as f:
+    json.dump(bbox, f)
+
+with open(scale_info_path, "w", encoding="utf-8") as f:
+    json.dump(scale_info, f)
+
+with open(alignment_path, "w", encoding="utf-8") as f:
+    json.dump(alignment_info, f)
+
+# 导出模型
+print(f"[Blender] 导出到: {out_path}")
+out_path_lower = out_path.lower()
+if out_path_lower.endswith(('.glb', '.gltf')):
+    try:
+        bpy.ops.export_scene.gltf(
+            filepath=out_path,
+            export_format='GLB' if out_path_lower.endswith('.glb') else 'GLTF_SEPARATE',
+            export_texcoords=True,
+            export_normals=True,
+            export_materials='EXPORT',
+            export_colors=True,
+            export_cameras=False,
+            export_extras=True,
+            export_yup=True
+        )
+        print(f"[Blender] GLB/GLTF导出成功")
+    except Exception as e:
+        print(f"[Blender] GLB/GLTF导出失败: {str(e)}")
+        bpy.ops.export_scene.gltf(filepath=out_path, export_format='GLB' if out_path_lower.endswith('.glb') else 'GLTF_SEPARATE')
+else:
+    try:
+        bpy.ops.export_scene.fbx(
+            filepath=out_path,
+            use_selection=False,
+            axis_forward='-Z', 
+            axis_up='Y',
+            path_mode='COPY',
+            embed_textures=True,
+            use_custom_props=True,
+            use_mesh_modifiers=True,
+            use_armature_deform_only=False,
+            add_leaf_bones=False,
+            primary_bone_axis='Y',
+            secondary_bone_axis='X',
+            use_metadata=True,
+            global_scale=1.0
+        )
+        print(f"[Blender] FBX导出成功")
+    except Exception as e:
+        print(f"[Blender] FBX导出失败: {str(e)}")
+        bpy.ops.export_scene.fbx(
+            filepath=out_path,
+            use_selection=False,
+            axis_forward='-Z', 
+            axis_up='Y',
+            path_mode='COPY',
+            embed_textures=True
+        )
+
+print(f"[Blender] 处理完成！")
+"""
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -755,6 +1087,54 @@ class BlenderSmartModelScalerBatch:
     def __init__(self):
         # 创建单个模型处理器实例，复用其方法
         self.single_processor = BlenderSmartModelScaler()
+        
+    def _process_with_alignment(self, mesh_path: str, ref_scale_x: float, ref_scale_y: float, 
+                              ref_scale_z: float, ref_rot_x: float, ref_rot_y: float, ref_rot_z: float,
+                              sx: float, sy: float, sz: float,
+                              blender_path: str, output_path: str):
+        """使用带对齐功能的Blender脚本处理模型"""
+        
+        with tempfile.TemporaryDirectory() as td:
+            script_path = os.path.join(td, "blender_scale_align.py")
+            bbox_path = os.path.join(td, "bbox.json")
+            scale_info_path = os.path.join(td, "scale_info.json")
+            alignment_path = os.path.join(td, "alignment.json")
+            
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(self.BLENDER_SCRIPT_WITH_ALIGNMENT)
+            
+            cmd = [
+                blender_path, "-b", "-noaudio",
+                "--python", script_path, "--",
+                mesh_path, output_path,
+                str(sx), str(sy), str(sz),
+                str(ref_scale_x), str(ref_scale_y), str(ref_scale_z),
+                str(ref_rot_x), str(ref_rot_y), str(ref_rot_z),
+                bbox_path, scale_info_path, alignment_path
+            ]
+            
+            print(f"[Batch] 执行带对齐功能的Blender命令...")
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            
+            if proc.stdout:
+                print(f"[Batch] Blender输出:\n{proc.stdout}")
+            if proc.stderr:
+                print(f"[Batch] Blender错误:\n{proc.stderr}")
+            
+            if proc.returncode != 0:
+                raise Exception(f"Blender 执行失败 (返回码: {proc.returncode})")
+            
+            # 读取结果
+            with open(bbox_path, "r", encoding="utf-8") as f:
+                bbox_data = json.load(f)
+                
+            with open(scale_info_path, "r", encoding="utf-8") as f:
+                scale_info_data = json.load(f)
+                
+            with open(alignment_path, "r", encoding="utf-8") as f:
+                alignment_data = json.load(f)
+            
+            return bbox_data, scale_info_data, alignment_data
         
     def _extract_file_extension(self, url: str) -> str:
         """从URL中提取文件扩展名"""
@@ -791,20 +1171,29 @@ class BlenderSmartModelScalerBatch:
             "error": None,
             "output_path": None,
             "bbox": None,
-            "scale_info": None
+            "scale_info": None,
+            "alignment_info": None,
+            "rotation": None
         }
         
         try:
             # 获取必要的字段
             name = obj_data.get("name", f"object_{index}")
             scale = obj_data.get("scale", [1.0, 1.0, 1.0])
+            rotation = obj_data.get("rotation", [0.0, 0.0, 0.0])  # 获取原始rotation
             url = obj_data.get("3d_url", "")
             
-            if not url:
-                raise Exception(f"对象 '{name}' 缺少3d_url字段")
+            if not url or url.strip() == "" or "None" in url:
+                print(f"[Batch] 对象 [{index}] '{name}' 的3d_url无效，跳过处理: {url}")
+                result["error"] = f"3d_url无效: {url}"
+                return result
                 
             if not isinstance(scale, list) or len(scale) < 3:
                 raise Exception(f"对象 '{name}' 的scale字段格式错误，期望[x, y, z]")
+                
+            if not isinstance(rotation, list) or len(rotation) < 3:
+                print(f"[Batch] 对象 '{name}' 的rotation字段格式不正确或缺失，使用默认值[0, 0, 0]")
+                rotation = [0.0, 0.0, 0.0]
             
             # 提取文件扩展名
             file_ext = self._extract_file_extension(url)
@@ -821,41 +1210,108 @@ class BlenderSmartModelScalerBatch:
             print(f"\n[Batch] 处理对象 [{index}] '{name}':")
             print(f"  - URL: {url}")
             print(f"  - 目标缩放: {scale}")
+            print(f"  - 原始旋转: {rotation}")
             print(f"  - 输出文件: {output_filename}")
             print(f"  - 文件格式: {file_ext}")
             
-            # 调用单个模型处理器
+            # 调用处理器（现在使用带对齐功能的版本）
             try:
                 # 为每个处理生成唯一的输出子目录，避免贴图文件冲突
-                # 使用固定的目录名，不使用时间戳，以确保路径一致性
                 unique_subdir = os.path.join("batch_3d", f"obj_{index:03d}")
-                output_name_with_subdir = os.path.join(unique_subdir, output_filename)
+                output_filename_with_subdir = os.path.join(unique_subdir, output_filename)
                 
-                mesh_path, bbox_json, scale_info_json = self.single_processor.process(
-                    mesh_path="",  # 不使用本地路径
-                    target_size_x=target_size_x,
-                    target_size_y=target_size_y,
-                    target_size_z=target_size_z,
-                    force_exact_alignment=force_exact_alignment,
-                    blender_path=blender_path,
-                    output_name=output_name_with_subdir,
-                    model_url=url
+                # 首先下载模型
+                print(f"[Batch] 下载模型: {url}")
+                downloaded_path = self.single_processor._download_model(url)
+                
+                if not downloaded_path or not os.path.exists(downloaded_path):
+                    raise Exception(f"模型下载失败或文件不存在: {downloaded_path}")
+                
+                # 获取模型初始包围盒
+                print(f"[Batch] 获取模型初始包围盒...")
+                initial_bbox = self.single_processor._get_model_bbox(downloaded_path, blender_path)
+                
+                if not initial_bbox:
+                    raise Exception(f"获取模型包围盒失败")
+                
+                # 计算智能缩放因子
+                model_info = ModelInfo(
+                    name=name,
+                    bounding_box_size=initial_bbox,
+                    target_scale=Vector3(target_size_x, target_size_y, target_size_z)
                 )
                 
+                scaling_config = ScalingConfig(
+                    force_exact_alignment=force_exact_alignment,
+                    standard_size=1.0,
+                    scale_range_min=0.001,
+                    scale_range_max=1000.0
+                )
+                
+                scaler = SmartScaler(scaling_config)
+                final_scale = scaler.calculate_smart_scale(model_info)
+                
+                # 准备输出路径
+                out_dir = os.path.join(folder_paths.get_output_directory(), "3d")
+                os.makedirs(out_dir, exist_ok=True)
+                output_path = os.path.join(out_dir, output_filename_with_subdir)
+                output_path = os.path.normpath(output_path)
+                out_dir_for_file = os.path.dirname(output_path)
+                os.makedirs(out_dir_for_file, exist_ok=True)
+                
+                # 使用带对齐功能的处理
+                # 传递原始的scale和rotation值
+                bbox_data, scale_info_data, alignment_data = self._process_with_alignment(
+                    downloaded_path,
+                    float(scale[0]), float(scale[1]), float(scale[2]),  # 原始scale值
+                    float(rotation[0]), float(rotation[1]), float(rotation[2]),  # 原始rotation值
+                    final_scale.x, final_scale.y, final_scale.z,
+                    blender_path,
+                    output_path
+                )
+                
+                if not bbox_data or not scale_info_data or not alignment_data:
+                    raise Exception(f"Blender处理返回了空数据")
+                
+                # 添加算法信息到scale_info
+                scale_info_data["algorithm_info"] = {
+                    "method": "smart_scaling_with_alignment",
+                    "target_size": [target_size_x, target_size_y, target_size_z],
+                    "force_exact_alignment": force_exact_alignment,
+                    "initial_bbox": [initial_bbox.x, initial_bbox.y, initial_bbox.z],
+                    "calculated_scale": [final_scale.x, final_scale.y, final_scale.z]
+                }
+                
+                # 添加输入源信息
+                scale_info_data["input_info"] = {
+                    "source_type": "url_download",
+                    "model_url": url,
+                    "downloaded_path": downloaded_path
+                }
+                
                 result["success"] = True
-                result["output_path"] = mesh_path
-                result["bbox"] = json.loads(bbox_json)
-                result["scale_info"] = json.loads(scale_info_json)
+                result["output_path"] = output_path
+                result["bbox"] = bbox_data
+                result["scale_info"] = scale_info_data
+                result["alignment_info"] = alignment_data
+                result["rotation"] = alignment_data["rotation_degrees"]
                 
                 # 打印输出路径信息
                 print(f"[Batch] 对象 [{index}] 处理成功")
-                print(f"  - 输出路径: {mesh_path}")
-                print(f"  - 文件存在: {os.path.exists(mesh_path)}")
+                print(f"  - 输出路径: {output_path}")
+                print(f"  - 文件存在: {os.path.exists(output_path)}")
+                
+                # 显示对齐状态
+                if alignment_data.get('is_already_aligned', False):
+                    print(f"  - 对齐状态: 已经与参考box平行对齐，保持原始方向")
+                    print(f"  - 旋转角度: X=0.0° Y=0.0° Z=0.0°")
+                else:
+                    print(f"  - 对齐状态: 需要旋转以对齐参考box")
+                    print(f"  - 计算的旋转: X={alignment_data['rotation_degrees'][0]:.1f}° Y={alignment_data['rotation_degrees'][1]:.1f}° Z={alignment_data['rotation_degrees'][2]:.1f}°")
                 
                 # 打印贴图处理信息
-                scale_info = json.loads(scale_info_json)
-                if scale_info.get("texture_count", 0) > 0:
-                    print(f"  - 贴图数量: {scale_info['texture_count']}")
+                if scale_info_data.get("texture_count", 0) > 0:
+                    print(f"  - 贴图数量: {scale_info_data['texture_count']}")
                 
             except Exception as e:
                 result["error"] = str(e)
@@ -931,24 +1387,39 @@ class BlenderSmartModelScalerBatch:
             # 统计处理结果
             success_count = sum(1 for r in results if r['success'])
             failed_count = len(results) - success_count
+            aligned_count = sum(1 for r in results if r['success'] and r.get('alignment_info', {}).get('is_already_aligned', False))
+            rotated_count = success_count - aligned_count
             elapsed_time = time.time() - start_time
             
             # 深拷贝原始数据，保持结构不变
             import copy
             output_data = copy.deepcopy(data)
             
-            # 更新每个成功处理的对象的3d_url字段
+            # 更新每个成功处理的对象的3d_url和rotation字段
             for result in results:
                 if result['success'] and result['output_path']:
                     index = result['index']
                     if 0 <= index < len(output_data['objects']):
-                        # 只更新3d_url字段，保留其他所有字段
+                        # 更新3d_url字段
                         output_data['objects'][index]['3d_url'] = result['output_path']
+                        
+                        # 更新rotation字段
+                        if result.get('alignment_info') and result.get('rotation'):
+                            is_aligned = result['alignment_info'].get('is_already_aligned', False)
+                            if is_aligned:
+                                # 如果已经对齐，完全保留原始rotation字段（不做任何修改）
+                                original_rotation = output_data['objects'][index].get('rotation', 'undefined')
+                                print(f"[Batch] 对象 [{index}] 已对齐，保留原始rotation: {original_rotation}")
+                            else:
+                                # 需要旋转对齐，使用计算得到的rotation
+                                output_data['objects'][index]['rotation'] = result['rotation']
+                                print(f"[Batch] 对象 [{index}] 更新rotation: {result['rotation']}")
                         
                         # 可选：添加处理信息到对象（如果需要的话）
                         # output_data['objects'][index]['_processing_info'] = {
                         #     'bbox': result['bbox'],
-                        #     'scale_info': result['scale_info']
+                        #     'scale_info': result['scale_info'],
+                        #     'alignment_info': result['alignment_info']
                         # }
             
             # 不添加任何额外字段，保持原始JSON结构
@@ -959,16 +1430,21 @@ class BlenderSmartModelScalerBatch:
             print(f"\n[Batch] 处理完成:")
             print(f"  - 总计: {len(objects)} 个对象")
             print(f"  - 成功: {success_count} 个")
-            print(f"  - 失败: {failed_count} 个")
+            print(f"    - 已对齐（保持原方向）: {aligned_count} 个")
+            print(f"    - 需要旋转对齐: {rotated_count} 个")
+            print(f"  - 跳过/失败: {failed_count} 个")
             print(f"  - 耗时: {elapsed_time:.2f} 秒")
             print(f"  - 平均: {elapsed_time/len(objects):.2f} 秒/对象")
             
-            # 打印失败的对象信息
+            # 打印跳过和失败的对象信息
             failed_objects = [r for r in results if not r['success']]
             if failed_objects:
-                print(f"\n[Batch] 失败的对象:")
+                print(f"\n[Batch] 跳过/失败的对象:")
                 for fail in failed_objects:
-                    print(f"  - [{fail['index']}] {fail['name']}: {fail['error']}")
+                    if "3d_url无效" in fail.get('error', ''):
+                        print(f"  - [{fail['index']}] {fail['name']}: 跳过（{fail['error']}）")
+                    else:
+                        print(f"  - [{fail['index']}] {fail['name']}: 失败（{fail['error']}）")
             
             print(f"=== VVL智能模型批量缩放器 结束 ===\n")
             
