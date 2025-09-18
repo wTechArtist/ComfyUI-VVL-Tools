@@ -87,7 +87,15 @@ class JsonObjectDeduplicator:
 
 class JsonObjectMerger:
     """
-    Merge processed JSON with removed duplicates, using the same 3d_url for objects with same name and scale.
+    Merge processed JSON with removed duplicates, copying processed fields (3d_url, rotation, etc.) 
+    to objects with same name and scale.
+    
+    Updates restored duplicate objects with fields from their corresponding processed objects:
+    - 3d_url: Always copied if exists in processed object
+    - rotation: Always copied if exists in processed object
+    - Additional fields can be easily added as needed
+    
+    This ensures all objects with the same base name and scale have consistent processed values.
     """
     
     @classmethod
@@ -123,8 +131,8 @@ class JsonObjectMerger:
             kept_original_indices = removed_data.get('kept_original_indices', [])
             original_count = removed_data.get('original_count', len(processed_objects) + len(removed_objects))
             
-            # Create a mapping of (base_name, scale) to 3d_url from processed objects
-            url_mapping = {}
+            # Create a mapping of (base_name, scale) to processed object data from processed objects
+            object_data_mapping = {}
             for obj in processed_objects:
                 name = obj.get('name', '')
                 base_name = re.sub(r'\d+$', '', name).strip()
@@ -132,25 +140,38 @@ class JsonObjectMerger:
                 scale_tuple = tuple(scale) if isinstance(scale, list) else scale
                 
                 combination_key = (base_name, scale_tuple)
-                if '3d_url' in obj:
-                    url_mapping[combination_key] = obj['3d_url']
+                # Store the entire processed object for reference
+                object_data_mapping[combination_key] = obj
             
-            # Restore removed objects with correct 3d_url
+            # Restore removed objects with updated fields from corresponding processed objects
             restored_objects = []
             for removed_obj in removed_objects:
                 # Remove metadata fields
                 obj = {k: v for k, v in removed_obj.items() 
                       if not k.startswith('_')}
                 
-                # Find matching 3d_url
+                # Find matching processed object
                 name = obj.get('name', '')
                 base_name = re.sub(r'\d+$', '', name).strip()
                 scale = obj.get('scale', [])
                 scale_tuple = tuple(scale) if isinstance(scale, list) else scale
                 
                 combination_key = (base_name, scale_tuple)
-                if combination_key in url_mapping:
-                    obj['3d_url'] = url_mapping[combination_key]
+                if combination_key in object_data_mapping:
+                    processed_obj = object_data_mapping[combination_key]
+                    
+                    # Copy specific fields from processed object to restored object
+                    # 3d_url - always copy if exists
+                    if '3d_url' in processed_obj:
+                        obj['3d_url'] = processed_obj['3d_url']
+                    
+                    # rotation - copy if exists in processed object
+                    if 'rotation' in processed_obj:
+                        obj['rotation'] = processed_obj['rotation']
+                    
+                    # You can add more fields here as needed
+                    # Example: if 'position' in processed_obj:
+                    #     obj['position'] = processed_obj['position']
                 
                 restored_objects.append(obj)
             
