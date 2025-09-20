@@ -1280,9 +1280,9 @@ print(f"[Blender] 处理完成！")
             output_filename = f"{index:03d}_{safe_name}{file_ext}"
             
             # 设置目标尺寸（scale值乘以100作为基准尺寸）
-            target_size_x = float(scale[0]) * 100.0
-            target_size_y = float(scale[1]) * 100.0
-            target_size_z = float(scale[2]) * 100.0
+            target_size_x = float(scale[0])
+            target_size_y = float(scale[1])
+            target_size_z = float(scale[2])
             
             print(f"\n[Batch] 处理对象 [{index}] '{name}':")
             print(f"  - URL: {url}")
