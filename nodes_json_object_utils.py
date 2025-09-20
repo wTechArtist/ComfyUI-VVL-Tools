@@ -166,8 +166,8 @@ class JsonObjectMerger:
                         obj['3d_url'] = processed_obj['3d_url']
                     
                     # rotation - copy if exists in processed object
-                    if 'rotation' in processed_obj:
-                        obj['rotation'] = processed_obj['rotation']
+                    # if 'rotation' in processed_obj:
+                    #     obj['rotation'] = processed_obj['rotation']
                     
                     # You can add more fields here as needed
                     # Example: if 'position' in processed_obj:
