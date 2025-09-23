@@ -217,10 +217,11 @@ class JsonObjectMerger:
 # Extract subject, names list, and scales list from JSON
 class JsonExtractSubjectNamesScales:
     """
-    Extracts subject, names list, and scales list from the input JSON.
+    Extracts subject, names list, scales list, and style from the input JSON.
 
     - names_json: JSON string array of names, optionally stripping numeric suffixes
     - scales_json: JSON string array of scale triplets (e.g., [[0.7,0.5,0.75], ...])
+    - style: Style string extracted from scene.style field
     Returning JSON strings keeps strong compatibility with community nodes.
     """
 
@@ -233,8 +234,8 @@ class JsonExtractSubjectNamesScales:
             }
         }
 
-    RETURN_TYPES = (IO.STRING, IO.ANY, IO.ANY)
-    RETURN_NAMES = ("subject", "names_list", "scales_list")
+    RETURN_TYPES = (IO.STRING, IO.ANY, IO.ANY, IO.STRING)
+    RETURN_NAMES = ("subject", "names_list", "scales_list", "style")
     FUNCTION = "extract_fields"
     CATEGORY = "VVL/json"
 
@@ -243,6 +244,10 @@ class JsonExtractSubjectNamesScales:
             data = json.loads(json_text)
             subject = data.get("subject", "")
             objects = data.get("objects", [])
+            
+            # Extract style from scene field
+            scene = data.get("scene", {})
+            style = scene.get("style", "") if isinstance(scene, dict) else ""
 
             names = []
             scales = []
@@ -257,13 +262,14 @@ class JsonExtractSubjectNamesScales:
                 subject,
                 names,
                 scales,
+                style,
             )
         except json.JSONDecodeError as e:
             msg = json.dumps({"error": f"Invalid JSON input: {str(e)}"})
-            return (msg, msg, msg)
+            return (msg, msg, msg, msg)
         except Exception as e:
             msg = json.dumps({"error": f"Error extracting fields: {str(e)}"})
-            return (msg, msg, msg)
+            return (msg, msg, msg, msg)
 
 
 class ApplyUrlsToJson:
