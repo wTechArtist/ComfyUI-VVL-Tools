@@ -183,7 +183,7 @@ class BlenderSmartModelScaler:
                 "output_name": ("STRING", {"default": "scaled.fbx", "tooltip": "输出文件名，支持 .fbx、.obj、.glb 等格式，文件将保存到 ComfyUI 输出目录的 3d 子文件夹中"}),
             },
             "optional": {
-                "model_url": ("STRING", {"forceInput": True, "tooltip": "可选：3D模型下载链接，支持 .fbx、.glb、.gltf 格式。如果提供此参数，mesh_path 将被忽略。模型会下载到 ComfyUI 输出目录的 downloads/3d_models 文件夹中"}),
+                "model_url": ("STRING", {"forceInput": True, "tooltip": "可选：3D模型链接或本地路径，支持 .fbx、.glb、.gltf、.obj 格式。\n• 如果是URL（http://、https://等），会自动下载到 downloads/3d_models 文件夹\n• 如果是本地路径（相对或绝对路径），会直接使用该文件\n• 支持 file:// 协议的本地文件链接\n• 如果提供此参数，mesh_path 将被忽略"}),
             }
         }
 
@@ -449,9 +449,76 @@ print(f"[Blender] 处理完成！")
         
         return os.path.join(base_dir, unique_name)
 
-    def _download_model(self, url: str) -> str:
+    def _is_url(self, path_or_url: str) -> bool:
+        """判断输入是URL还是本地路径"""
+        if not path_or_url or not isinstance(path_or_url, str):
+            return False
+            
+        path_or_url = path_or_url.strip()
+        
+        # 明确的URL协议
+        if path_or_url.startswith(('http://', 'https://', 'ftp://', 'ftps://')):
+            return True
+            
+        # 包含://但不是文件路径的其他协议
+        if '://' in path_or_url and not path_or_url.startswith('file://'):
+            return True
+            
+        return False
+    
+    def _handle_local_path(self, file_path: str) -> str:
+        """处理本地路径，验证存在性并返回规范化的绝对路径"""
+        if not file_path or not isinstance(file_path, str):
+            raise Exception("无效的文件路径")
+            
+        file_path = file_path.strip()
+        
+        # 处理file://协议
+        if file_path.startswith('file://'):
+            file_path = file_path[7:]  # 移除file://前缀
+            # Windows系统下可能有额外的斜杠
+            if os.name == 'nt' and file_path.startswith('/'):
+                file_path = file_path[1:]
+        
+        # 规范化路径
+        file_path = os.path.normpath(file_path)
+        
+        # 转换为绝对路径
+        if not os.path.isabs(file_path):
+            # 相对路径，相对于当前工作目录
+            file_path = os.path.abspath(file_path)
+        
+        # 验证文件存在
+        if not os.path.exists(file_path):
+            raise Exception(f"本地文件不存在: {file_path}")
+        
+        # 验证是文件而不是目录
+        if not os.path.isfile(file_path):
+            raise Exception(f"路径不是文件: {file_path}")
+        
+        # 验证文件格式
+        file_ext = os.path.splitext(file_path)[1].lower()
+        if file_ext not in ('.fbx', '.glb', '.gltf', '.obj'):
+            print(f"[Node] 警告: 文件扩展名 '{file_ext}' 可能不受支持，支持的格式: .fbx, .glb, .gltf, .obj")
+        
+        print(f"[Node] 使用本地文件: {file_path}")
+        return file_path
+
+    def _download_model(self, url_or_path: str) -> str:
+        """从URL下载3D模型文件或处理本地文件路径"""
+        print(f"[Node] 处理模型输入: {url_or_path}")
+        
+        # 判断是URL还是本地路径
+        if self._is_url(url_or_path):
+            print(f"[Node] 检测到URL，开始下载...")
+            return self._download_from_url(url_or_path)
+        else:
+            print(f"[Node] 检测到本地路径，验证文件...")
+            return self._handle_local_path(url_or_path)
+    
+    def _download_from_url(self, url: str) -> str:
         """从URL下载3D模型文件"""
-        print(f"[Node] 开始下载模型: {url}")
+        print(f"[Node] 从URL下载模型: {url}")
         
         # 创建下载目录
         download_dir = os.path.join(folder_paths.get_output_directory(), "downloads", "3d_models")
@@ -491,8 +558,8 @@ print(f"[Blender] 处理完成！")
                 
                 # 验证文件格式
                 file_ext = os.path.splitext(file_path)[1].lower()
-                if file_ext not in ('.fbx', '.glb', '.gltf'):
-                    print(f"[Node] 警告: 文件扩展名 '{file_ext}' 可能不受支持")
+                if file_ext not in ('.fbx', '.glb', '.gltf', '.obj'):
+                    print(f"[Node] 警告: 文件扩展名 '{file_ext}' 可能不受支持，支持的格式: .fbx, .glb, .gltf, .obj")
                 
                 return file_path
             else:
@@ -687,11 +754,15 @@ with open(bbox_path, "w", encoding="utf-8") as f:
             }
             
             # 添加输入源信息
+            is_url_input = bool(model_url and model_url.strip())
+            final_input = model_url.strip() if is_url_input else mesh_path
             scale_info_data["input_info"] = {
-                "source_type": "url_download" if (model_url and model_url.strip()) else "local_file",
+                "source_type": "url_download" if is_url_input else "local_file",
                 "original_mesh_path": mesh_path,
                 "actual_mesh_path": actual_mesh_path,
-                "model_url": model_url.strip() if model_url else None
+                "model_url": model_url.strip() if model_url else None,
+                "is_url": is_url_input,
+                "final_input": final_input
             }
             
             # 打印材质信息
@@ -715,6 +786,12 @@ class BlenderSmartModelScalerBatch:
     
     输入：包含objects数组的JSON，每个object需要包含name、scale和3d_url字段
     输出：保持原始JSON结构，更新3d_url为处理后的本地文件路径，更新rotation为计算得到的对齐旋转值
+    
+    3d_url字段支持：
+    • HTTP/HTTPS URL：自动下载模型文件
+    • 本地绝对路径：如 C:/models/model.fbx 或 /home/user/models/model.glb
+    • 本地相对路径：如 ./models/model.fbx 或 ../resources/model.glb
+    • file:// 协议：如 file:///C:/models/model.fbx
     
     特性：
     - 保留JSON中的所有原始字段和结构
@@ -1070,7 +1147,7 @@ print(f"[Blender] 处理完成！")
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "json_text": ("STRING", {"multiline": True, "default": "", "tooltip": "包含objects数组的JSON数据，每个object包含name、scale和3d_url字段"}),
+                "json_text": ("STRING", {"multiline": True, "default": "", "tooltip": "包含objects数组的JSON数据，每个object包含name、scale和3d_url字段\n• 3d_url支持HTTP/HTTPS链接和本地文件路径\n• 本地路径示例：C:/models/model.fbx, ./models/model.glb, file:///path/to/model.fbx"}),
                 "force_exact_alignment": ("BOOLEAN", {"default": True, "tooltip": "强制精确对齐：启用时允许各轴独立缩放以匹配目标尺寸（可能造成拉伸变形），禁用时保持模型原始比例进行等比缩放"}),
                 "blender_path": ("STRING", {"default": "blender", "tooltip": "Blender 可执行文件路径，默认使用系统PATH中的 'blender' 命令，也可指定完整路径"}),
             },
@@ -1203,9 +1280,9 @@ print(f"[Blender] 处理完成！")
             output_filename = f"{index:03d}_{safe_name}{file_ext}"
             
             # 设置目标尺寸（scale值乘以100作为基准尺寸）
-            target_size_x = float(scale[0]) * 100.0
-            target_size_y = float(scale[1]) * 100.0
-            target_size_z = float(scale[2]) * 100.0
+            target_size_x = float(scale[0])
+            target_size_y = float(scale[1])
+            target_size_z = float(scale[2])
             
             print(f"\n[Batch] 处理对象 [{index}] '{name}':")
             print(f"  - URL: {url}")
@@ -1220,8 +1297,8 @@ print(f"[Blender] 处理完成！")
                 unique_subdir = os.path.join("batch_3d", f"obj_{index:03d}")
                 output_filename_with_subdir = os.path.join(unique_subdir, output_filename)
                 
-                # 首先下载模型
-                print(f"[Batch] 下载模型: {url}")
+                # 处理模型输入（URL下载或本地文件）
+                print(f"[Batch] 处理模型: {url}")
                 downloaded_path = self.single_processor._download_model(url)
                 
                 if not downloaded_path or not os.path.exists(downloaded_path):
@@ -1283,10 +1360,12 @@ print(f"[Blender] 处理完成！")
                 }
                 
                 # 添加输入源信息
+                is_url_input = self.single_processor._is_url(url)
                 scale_info_data["input_info"] = {
-                    "source_type": "url_download",
-                    "model_url": url,
-                    "downloaded_path": downloaded_path
+                    "source_type": "url_download" if is_url_input else "local_file",
+                    "original_input": url,
+                    "resolved_path": downloaded_path,
+                    "is_url": is_url_input
                 }
                 
                 result["success"] = True
