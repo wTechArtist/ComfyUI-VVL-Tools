@@ -77,7 +77,7 @@ NODE_CLASS_MAPPINGS = {
     "TextCombineMulti": TextCombineMulti,
     
     # Blender节点 (2个)
-    "BlenderSmartModelScaler": BlenderSmartModelScaler,
+    "ModelTransformParameters": ModelTransformParameters,
     "BlenderSmartModelScalerBatch": BlenderSmartModelScalerBatch,
 }
 
@@ -129,12 +129,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TextCombineMulti": "VVL Text Combine Multi",
     
     # Blender节点
-    "BlenderSmartModelScaler": "VVL Blender Smart Model Scaler",
+    "ModelTransformParameters": "VVL Model Transform Parameters",
     "BlenderSmartModelScalerBatch": "VVL Blender Smart Model Scaler Batch",
 }
 
 print("------------------------------------------")    
-print("\033[34mVVL Tools: \033[92m 30+ Nodes Loaded\033[0m")
+print("\033[34mVVL Tools: \033[92m 30 Nodes Loaded\033[0m")
 print("------------------------------------------") 
 
 # 导出给ComfyUI

@@ -165,253 +165,11 @@ class SmartScaler:
             
         return Vector3(smart_target[0], smart_target[1], smart_target[2])
 
+# BlenderSmartModelScaler 作为辅助类，不注册为节点
 class BlenderSmartModelScaler:
     """
-    VVL智能3D模型缩放器
-    基于包围盒和目标尺寸进行精确智能缩放
-    """
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "mesh_path": ("STRING", {}),
-                "target_size_x": ("FLOAT", {"default": 100.0, "min": 0.1, "max": 10000.0}),
-                "target_size_y": ("FLOAT", {"default": 100.0, "min": 0.1, "max": 10000.0}),
-                "target_size_z": ("FLOAT", {"default": 100.0, "min": 0.1, "max": 10000.0}),
-                "force_exact_alignment": ("BOOLEAN", {"default": True, "tooltip": "强制精确对齐：启用时允许各轴独立缩放以匹配目标尺寸（可能造成拉伸变形），禁用时保持模型原始比例进行等比缩放"}),
-                "blender_path": ("STRING", {"default": "blender", "tooltip": "Blender 可执行文件路径，默认使用系统PATH中的 'blender' 命令，也可指定完整路径。Windows示例: 'C:/Program Files/Blender Foundation/Blender 4.0/blender.exe'，Linux示例: '/usr/bin/blender' 或 '/opt/blender/blender'"}),
-                "output_name": ("STRING", {"default": "scaled.fbx", "tooltip": "输出文件名，支持 .fbx、.obj、.glb 等格式，文件将保存到 ComfyUI 输出目录的 3d 子文件夹中"}),
-            },
-            "optional": {
-                "model_url": ("STRING", {"forceInput": True, "tooltip": "可选：3D模型链接或本地路径，支持 .fbx、.glb、.gltf、.obj 格式。\n• 如果是URL（http://、https://等），会自动下载到 downloads/3d_models 文件夹\n• 如果是本地路径（相对或绝对路径），会直接使用该文件\n• 支持 file:// 协议的本地文件链接\n• 如果提供此参数，mesh_path 将被忽略"}),
-            }
-        }
-
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("mesh_path", "bbox_json", "scale_info")
-    FUNCTION = "process"
-    CATEGORY = "VVL/3D"
-
-    BLENDER_SCRIPT = r"""
-import bpy, sys, json, math
-from mathutils import Vector, Matrix
-
-argv = sys.argv[sys.argv.index("--")+1:]
-in_path, out_path, sx, sy, sz, bbox_path, scale_info_path = argv
-sx, sy, sz = float(sx), float(sy), float(sz)
-
-print(f"[Blender] 开始处理模型: {in_path}")
-print(f"[Blender] 应用缩放: sx={sx:.3f}, sy={sy:.3f}, sz={sz:.3f}")
-print(f"[Blender] 缩放将烘焙到顶点")
-
-bpy.ops.wm.read_factory_settings(use_empty=True)
-
-lower = in_path.lower()
-print(f"[Blender] 导入文件类型: {lower}")
-try:
-    if lower.endswith(".fbx"):
-        bpy.ops.import_scene.fbx(filepath=in_path, global_scale=1.0, axis_forward='-Z', axis_up='Y',
-                                use_image_search=True, use_custom_props=True)
-    elif lower.endswith((".glb", ".gltf")):
-        bpy.ops.import_scene.gltf(filepath=in_path, import_pack_images=True)
-    print(f"[Blender] 导入成功")
-except Exception as e:
-    print(f"[Blender] 导入警告: {str(e)}")
-    if lower.endswith(".fbx"):
-        bpy.ops.import_scene.fbx(filepath=in_path)
-    elif lower.endswith((".glb", ".gltf")):
-        bpy.ops.import_scene.gltf(filepath=in_path)
-    print(f"[Blender] 使用基本导入模式成功")
-
-# 修复GLB导入后的纹理路径问题（确保FBX导出时纹理正确）
-if lower.endswith((".glb", ".gltf")):
-    print(f"[Blender] 修复GLB纹理路径以确保FBX导出兼容性...")
-    image_counter = 0
-    for img in bpy.data.images:
-        if img.source == 'FILE' and not img.filepath:
-            # 为没有filepath的图像设置一个虚假的路径
-            fake_path = f"texture_{image_counter:03d}.png"
-            img.filepath = fake_path
-            print(f"[Blender] 修复图像路径: {img.name} -> {fake_path}")
-            image_counter += 1
-        elif img.packed_file and not img.filepath:
-            # 对于packed文件，也需要设置路径
-            fake_path = f"packed_texture_{image_counter:03d}.png"
-            img.filepath = fake_path
-            print(f"[Blender] 修复packed图像路径: {img.name} -> {fake_path}")
-            image_counter += 1
-    print(f"[Blender] 纹理路径修复完成，处理了 {image_counter} 个图像")
-
-meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH']
-print(f"[Blender] 找到 {len(meshes)} 个网格对象")
-
-original_gmin = Vector(( math.inf,  math.inf,  math.inf))
-original_gmax = Vector((-math.inf, -math.inf, -math.inf))
-for o in meshes:
-    for corner in o.bound_box:
-        wpt = o.matrix_world @ Vector(corner)
-        original_gmin.x = min(original_gmin.x, wpt.x)
-        original_gmin.y = min(original_gmin.y, wpt.y)
-        original_gmin.z = min(original_gmin.z, wpt.z)
-        original_gmax.x = max(original_gmax.x, wpt.x)
-        original_gmax.y = max(original_gmax.y, wpt.y)
-        original_gmax.z = max(original_gmax.z, wpt.z)
-
-original_size = [original_gmax[i] - original_gmin[i] for i in range(3)]
-print(f"[Blender] 原始包围盒尺寸: ({original_size[0]:.2f}, {original_size[1]:.2f}, {original_size[2]:.2f})")
-
-for o in meshes:
-    o.select_set(True)
-    original_scale = o.scale.copy()
-    o.scale = (o.scale[0]*sx, o.scale[1]*sy, o.scale[2]*sz)
-    print(f"[Blender] 对象 '{o.name}' 缩放: {original_scale} -> {o.scale}")
-
-# 烘焙缩放到顶点
-bpy.context.view_layer.objects.active = meshes[0] if meshes else None
-if meshes:
-    print(f"[Blender] 烘焙缩放到顶点...")
-    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-
-# 计算缩放后的全局 AABB
-gmin = Vector(( math.inf,  math.inf,  math.inf))
-gmax = Vector((-math.inf, -math.inf, -math.inf))
-for o in meshes:
-    for corner in o.bound_box:
-        wpt = o.matrix_world @ Vector(corner)
-        gmin.x = min(gmin.x, wpt.x)
-        gmin.y = min(gmin.y, wpt.y)
-        gmin.z = min(gmin.z, wpt.z)
-        gmax.x = max(gmax.x, wpt.x)
-        gmax.y = max(gmax.y, wpt.y)
-        gmax.z = max(gmax.z, wpt.z)
-
-final_size = [gmax[i] - gmin[i] for i in range(3)]
-print(f"[Blender] 缩放后包围盒尺寸: ({final_size[0]:.2f}, {final_size[1]:.2f}, {final_size[2]:.2f})")
-
-# 准备输出数据（先初始化占位，材质统计稍后填充）
-bbox = {"min":[gmin.x,gmin.y,gmin.z], "max":[gmax.x,gmax.y,gmax.z], "size": final_size}
-material_count = 0
-texture_count = 0
-scale_info = {
-    "applied_scale": [sx, sy, sz],
-    "original_size": original_size,
-    "final_size": final_size,
-    "size_change_ratio": [final_size[i]/original_size[i] if original_size[i] > 0 else 1.0 for i in range(3)],
-    "mesh_count": len(meshes),
-    "scale_applied_to_vertices": True,
-    "material_count": material_count,
-    "texture_count": texture_count,
-    "materials_preserved": False
-}
-
-# 导出模型（保留所有材质和贴图信息）
-print(f"[Blender] 导出到: {out_path}")
-print(f"[Blender] 保留材质和贴图数据...")
-
-# 检查并记录材质信息
-material_count = 0
-texture_count = 0
-try:
-    for obj in meshes:
-        if obj.data.materials:
-            material_count += len(obj.data.materials)
-            for mat in obj.data.materials:
-                if mat and hasattr(mat, 'use_nodes') and mat.use_nodes and hasattr(mat, 'node_tree'):
-                    for node in mat.node_tree.nodes:
-                        if node.type == 'TEX_IMAGE' and hasattr(node, 'image') and node.image:
-                            texture_count += 1
-                            print(f"[Blender] 发现贴图: {node.image.name}")
-except Exception as e:
-    print(f"[Blender] 材质检查警告: {str(e)}")
-
-print(f"[Blender] 共有 {material_count} 个材质, {texture_count} 个贴图")
-
-# 同步材质统计到 scale_info（以免后续导出失败导致文件未写出）
-scale_info["material_count"] = material_count
-scale_info["texture_count"] = texture_count
-scale_info["materials_preserved"] = (texture_count > 0 or material_count > 0)
-
-# 先写入 bbox 与 scale_info，避免后续导出失败导致文件缺失
-with open(bbox_path, "w", encoding="utf-8") as f:
-    json.dump(bbox, f)
-
-with open(scale_info_path, "w", encoding="utf-8") as f:
-    json.dump(scale_info, f)
-
-# 根据输出文件格式选择导出器
-out_path_lower = out_path.lower()
-if out_path_lower.endswith(('.glb', '.gltf')):
-    # GLB/GLTF导出
-    try:
-        print(f"[Blender] 尝试GLB/GLTF完整导出...")
-        bpy.ops.export_scene.gltf(
-            filepath=out_path,
-            export_format='GLB' if out_path_lower.endswith('.glb') else 'GLTF_SEPARATE',
-            export_texcoords=True,
-            export_normals=True,
-            export_materials='EXPORT',
-            export_colors=True,
-            export_cameras=False,
-            export_extras=True,
-            export_yup=True
-        )
-        print(f"[Blender] GLB/GLTF完整导出成功")
-    except Exception as e:
-        print(f"[Blender] GLB/GLTF完整导出失败，尝试基本导出: {str(e)}")
-        try:
-            bpy.ops.export_scene.gltf(
-                filepath=out_path,
-                export_format='GLB' if out_path_lower.endswith('.glb') else 'GLTF_SEPARATE'
-            )
-            print(f"[Blender] GLB/GLTF基本导出成功")
-        except Exception as e2:
-            print(f"[Blender] GLB/GLTF基本导出也失败: {str(e2)}")
-            raise e2
-else:
-    # FBX导出（带错误处理，针对GLB转换优化）
-    try:
-        print(f"[Blender] 尝试FBX完整导出...")
-        bpy.ops.export_scene.fbx(
-            filepath=out_path,
-            use_selection=False,
-            axis_forward='-Z', 
-            axis_up='Y',
-            path_mode='COPY',           # 复制贴图文件
-            embed_textures=True,        # 嵌入贴图
-            use_custom_props=True,      # 保留自定义属性
-            use_mesh_modifiers=True,    # 应用修改器
-            use_armature_deform_only=False,  # 包含所有骨骼
-            add_leaf_bones=False,       # 不添加叶子骨骼
-            primary_bone_axis='Y',      # 骨骼轴向
-            secondary_bone_axis='X',    # 次要轴向
-            use_metadata=True,          # 包含元数据
-            global_scale=1.0
-        )
-        print(f"[Blender] FBX完整导出成功")
-    except Exception as e:
-        print(f"[Blender] FBX完整导出失败，尝试基本导出: {str(e)}")
-        try:
-            bpy.ops.export_scene.fbx(
-                filepath=out_path,
-                use_selection=False,
-                axis_forward='-Z', 
-                axis_up='Y',
-                path_mode='COPY',      # 确保基本导出也复制纹理
-                embed_textures=True    # 确保基本导出也嵌入纹理
-            )
-            print(f"[Blender] FBX基本导出成功")
-        except Exception as e2:
-            print(f"[Blender] FBX基本导出也失败: {str(e2)}")
-            raise e2
-
-# 保存结果
-with open(bbox_path, "w", encoding="utf-8") as f:
-    json.dump(bbox, f)
-
-with open(scale_info_path, "w", encoding="utf-8") as f:
-    json.dump(scale_info, f)
-
-print(f"[Blender] 处理完成！")
+    VVL智能3D模型缩放器辅助类
+    用于 BlenderSmartModelScalerBatch 和 JsonRotationApplier 的内部辅助功能
 """
 
     def _ensure_blender(self, blender_path: str):
@@ -423,14 +181,11 @@ print(f"[Blender] 处理完成！")
         parsed_url = urllib.parse.urlparse(url)
         original_filename = os.path.basename(parsed_url.path)
         
-        # 如果URL没有文件名，尝试从Content-Disposition获取
         if not original_filename or '.' not in original_filename:
-            original_filename = "model.fbx"  # 默认文件名
+            original_filename = "model.fbx"
         
-        # 确保文件扩展名正确
         file_ext = os.path.splitext(original_filename)[1].lower()
         if file_ext not in ('.fbx', '.glb', '.gltf'):
-            # 尝试从URL的query参数或headers中推断格式
             if 'fbx' in url.lower():
                 file_ext = '.fbx'
             elif 'glb' in url.lower():
@@ -438,11 +193,9 @@ print(f"[Blender] 处理完成！")
             elif 'gltf' in url.lower():
                 file_ext = '.gltf'
             else:
-                file_ext = '.fbx'  # 默认为FBX
+                file_ext = '.fbx'
         
         base_name = os.path.splitext(original_filename)[0]
-        
-        # 生成时间戳和URL哈希来确保唯一性
         timestamp = str(int(time.time()))
         url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:8]
         unique_name = f"{base_name}_{timestamp}_{url_hash}{file_ext}"
@@ -456,11 +209,9 @@ print(f"[Blender] 处理完成！")
             
         path_or_url = path_or_url.strip()
         
-        # 明确的URL协议
         if path_or_url.startswith(('http://', 'https://', 'ftp://', 'ftps://')):
             return True
             
-        # 包含://但不是文件路径的其他协议
         if '://' in path_or_url and not path_or_url.startswith('file://'):
             return True
             
@@ -473,30 +224,22 @@ print(f"[Blender] 处理完成！")
             
         file_path = file_path.strip()
         
-        # 处理file://协议
         if file_path.startswith('file://'):
-            file_path = file_path[7:]  # 移除file://前缀
-            # Windows系统下可能有额外的斜杠
+            file_path = file_path[7:]
             if os.name == 'nt' and file_path.startswith('/'):
                 file_path = file_path[1:]
         
-        # 规范化路径
         file_path = os.path.normpath(file_path)
         
-        # 转换为绝对路径
         if not os.path.isabs(file_path):
-            # 相对路径，相对于当前工作目录
             file_path = os.path.abspath(file_path)
         
-        # 验证文件存在
         if not os.path.exists(file_path):
             raise Exception(f"本地文件不存在: {file_path}")
         
-        # 验证是文件而不是目录
         if not os.path.isfile(file_path):
             raise Exception(f"路径不是文件: {file_path}")
         
-        # 验证文件格式
         file_ext = os.path.splitext(file_path)[1].lower()
         if file_ext not in ('.fbx', '.glb', '.gltf', '.obj'):
             print(f"[Node] 警告: 文件扩展名 '{file_ext}' 可能不受支持，支持的格式: .fbx, .glb, .gltf, .obj")
@@ -508,7 +251,6 @@ print(f"[Blender] 处理完成！")
         """从URL下载3D模型文件或处理本地文件路径"""
         print(f"[Node] 处理模型输入: {url_or_path}")
         
-        # 判断是URL还是本地路径
         if self._is_url(url_or_path):
             print(f"[Node] 检测到URL，开始下载...")
             return self._download_from_url(url_or_path)
@@ -520,11 +262,9 @@ print(f"[Blender] 处理完成！")
         """从URL下载3D模型文件"""
         print(f"[Node] 从URL下载模型: {url}")
         
-        # 创建下载目录
         download_dir = os.path.join(folder_paths.get_output_directory(), "downloads", "3d_models")
         os.makedirs(download_dir, exist_ok=True)
         
-        # 生成唯一的文件路径
         file_path = self._generate_unique_filename(download_dir, url)
         
         try:
@@ -540,7 +280,6 @@ print(f"[Blender] 处理完成！")
                 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
             }
             
-            # 检查是否为需要认证的dreammaker域名
             from urllib.parse import urlparse
             parsed_url = urlparse(url)
             if 'dreammaker.netease.com' in parsed_url.netloc:
@@ -556,7 +295,6 @@ print(f"[Blender] 处理完成！")
                     f.write(response.content)
                 print(f"[Node] 下载成功: {len(response.content) / (1024*1024):.2f} MB")
                 
-                # 验证文件格式
                 file_ext = os.path.splitext(file_path)[1].lower()
                 if file_ext not in ('.fbx', '.glb', '.gltf', '.obj'):
                     print(f"[Node] 警告: 文件扩展名 '{file_ext}' 可能不受支持，支持的格式: .fbx, .glb, .gltf, .obj")
@@ -568,7 +306,6 @@ print(f"[Blender] 处理完成！")
         except ImportError:
             raise Exception("需要安装requests库: pip install requests")
         except Exception as e:
-            # 清理可能的不完整文件
             if os.path.exists(file_path):
                 try:
                     os.remove(file_path)
@@ -627,156 +364,106 @@ with open(bbox_path, "w", encoding="utf-8") as f:
                 size = data["size"]
                 return Vector3(size[0], size[1], size[2])
 
-    def process(self, mesh_path: str, target_size_x: float, target_size_y: float, target_size_z: float, 
-                force_exact_alignment: bool, blender_path: str, output_name: str, model_url: str = ""):
-        
-        print(f"\n=== VVL智能模型缩放器 开始处理 ===")
-        
-        # 处理模型输入：优先使用URL下载
-        actual_mesh_path = mesh_path
-        if model_url and model_url.strip():
-            print(f"[Node] 检测到模型URL，将下载: {model_url}")
-            try:
-                actual_mesh_path = self._download_model(model_url.strip())
-                print(f"[Node] URL下载成功，使用下载的模型: {actual_mesh_path}")
-            except Exception as e:
-                raise Exception(f"模型下载失败: {str(e)}")
-        else:
-            print(f"[Node] 使用本地模型: {mesh_path}")
-            if not mesh_path or not mesh_path.strip():
-                raise Exception("请提供 mesh_path 或 model_url 参数")
-            actual_mesh_path = mesh_path
-        
-        print(f"[Node] 最终使用的模型: {actual_mesh_path}")
-        print(f"[Node] 目标尺寸: ({target_size_x:.1f}, {target_size_y:.1f}, {target_size_z:.1f})")
-        print(f"[Node] 强制精确对齐: {force_exact_alignment}")
-        print(f"[Node] 缩放将烘焙到顶点")
-        
-        # 验证模型文件
-        if not os.path.exists(actual_mesh_path):
-            raise Exception(f"模型文件不存在: {actual_mesh_path}")
-        
-        ext = os.path.splitext(actual_mesh_path)[1].lower()
-        if ext not in (".fbx", ".glb", ".gltf"):
-            raise Exception("仅支持 .fbx / .glb / .gltf 输入。")
 
-        self._ensure_blender(blender_path)
-
-        # 获取模型初始包围盒
-        print(f"[Node] 获取模型初始包围盒...")
-        initial_bbox = self._get_model_bbox(actual_mesh_path, blender_path)
-        print(f"[Node] 初始包围盒尺寸: ({initial_bbox.x:.2f}, {initial_bbox.y:.2f}, {initial_bbox.z:.2f})")
+class ModelTransformParameters:
+    """
+    模型变换参数节点
+    
+    只负责设置和传递变换参数，不进行实际的模型处理：
+    • 输出旋转偏移量（度）
+    • 输出缩放乘数
+    • 可以连接到 BlenderSmartModelScalerBatch 节点
+    • 轻量级节点，无需 Blender
+    
+    🎯 功能：
+    • 设置 X/Y/Z 轴的旋转偏移量
+    • 设置 X/Y/Z 轴的缩放乘数
+    • 输出变换参数供 BlenderSmartModelScalerBatch 使用
+    
+    📝 使用方式：
+    1. 设置所需的旋转和缩放参数
+    2. 将输出连接到 BlenderSmartModelScalerBatch 节点
+    3. BlenderSmartModelScalerBatch 会在最开始应用这些变换
+    
+    ⚡ 执行顺序（在 BlenderSmartModelScalerBatch 中）：
+    1. 应用额外旋转（本节点的旋转参数）
+    2. 应用额外缩放（本节点的缩放参数）
+    3. 叠加变换到JSON数据（rotation和scale字段）
+    4. 计算包围盒
+    5. 基于更新后的JSON计算对齐和智能缩放
+    6. 应用智能缩放和对齐旋转
+    
+    ⚙️ 参数范围：
+    • 旋转：-360° 到 +360°，步进 0.1°
+    • 缩放：0.001 到 1000，步进 0.001
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "rotation_x_offset": ("FLOAT", {
+                    "default": 0.0, 
+                    "min": -360.0, 
+                    "max": 360.0, 
+                    "step": 0.1,
+                    "tooltip": "X轴旋转偏移量（度）\n正值：绕X轴正方向旋转\n负值：绕X轴负方向旋转"
+                }),
+                "rotation_y_offset": ("FLOAT", {
+                    "default": 0.0, 
+                    "min": -360.0, 
+                    "max": 360.0, 
+                    "step": 0.1,
+                    "tooltip": "Y轴旋转偏移量（度）\n正值：绕Y轴正方向旋转\n负值：绕Y轴负方向旋转"
+                }),
+                "rotation_z_offset": ("FLOAT", {
+                    "default": 0.0, 
+                    "min": -360.0, 
+                    "max": 360.0, 
+                    "step": 0.1,
+                    "tooltip": "Z轴旋转偏移量（度）\n正值：绕Z轴正方向旋转\n负值：绕Z轴负方向旋转"
+                }),
+                "scale_x_multiplier": ("FLOAT", {
+                    "default": 1.0, 
+                    "min": 0.001, 
+                    "max": 1000.0, 
+                    "step": 0.001,
+                    "tooltip": "X轴缩放乘数\n1.0：保持原尺寸\n0.5：缩小一半\n2.0：放大一倍"
+                }),
+                "scale_y_multiplier": ("FLOAT", {
+                    "default": 1.0, 
+                    "min": 0.001, 
+                    "max": 1000.0, 
+                    "step": 0.001,
+                    "tooltip": "Y轴缩放乘数\n1.0：保持原尺寸\n0.5：缩小一半\n2.0：放大一倍"
+                }),
+                "scale_z_multiplier": ("FLOAT", {
+                    "default": 1.0, 
+                    "min": 0.001, 
+                    "max": 1000.0, 
+                    "step": 0.001,
+                    "tooltip": "Z轴缩放乘数\n1.0：保持原尺寸\n0.5：缩小一半\n2.0：放大一倍"
+                }),
+            },
+        }
+    
+    RETURN_TYPES = ("TRANSFORM_PARAMS",)
+    RETURN_NAMES = ("transform_params",)
+    FUNCTION = "output_transform"
+    CATEGORY = "VVL/3D"
+    
+    def output_transform(self, rotation_x_offset, rotation_y_offset, rotation_z_offset,
+                        scale_x_multiplier, scale_y_multiplier, scale_z_multiplier, **kwargs):
+        """输出变换参数（旋转+缩放）"""
+        print(f"[Transform] 旋转参数: X={rotation_x_offset}°, Y={rotation_y_offset}°, Z={rotation_z_offset}°")
+        print(f"[Transform] 缩放参数: X={scale_x_multiplier}, Y={scale_y_multiplier}, Z={scale_z_multiplier}")
         
-        # 计算智能缩放因子
-        print(f"[Node] 计算智能缩放因子...")
-        model_name = os.path.splitext(os.path.basename(actual_mesh_path))[0]
-        
-        model_info = ModelInfo(
-            name=model_name,
-            bounding_box_size=initial_bbox,
-            target_scale=Vector3(target_size_x, target_size_y, target_size_z)
-        )
-        
-        scaling_config = ScalingConfig(
-            force_exact_alignment=force_exact_alignment,
-            standard_size=1.0,
-            scale_range_min=0.001,
-            scale_range_max=1000.0
-        )
-        
-        scaler = SmartScaler(scaling_config)
-        final_scale = scaler.calculate_smart_scale(model_info)
-        
-        print(f"[Node] 计算得到的最终缩放: ({final_scale.x:.3f}, {final_scale.y:.3f}, {final_scale.z:.3f})")
-        
-        # 应用缩放并生成模型
-        print(f"[Node] 应用缩放并生成模型...")
-        out_dir = os.path.join(folder_paths.get_output_directory(), "3d")
-        os.makedirs(out_dir, exist_ok=True)
-        
-        # 处理输出路径，确保目录存在
-        out_path = os.path.join(out_dir, output_name)
-        out_path = os.path.normpath(out_path)  # 规范化路径，统一使用系统的路径分隔符
-        
-        # 确保输出目录存在
-        out_dir_for_file = os.path.dirname(out_path)
-        os.makedirs(out_dir_for_file, exist_ok=True)
-
-        # 写入临时的 Blender 脚本与输出路径
-        with tempfile.TemporaryDirectory() as td:
-            script_path = os.path.join(td, "blender_scale_bbox.py")
-            bbox_path = os.path.join(td, "bbox.json")
-            scale_info_path = os.path.join(td, "scale_info.json")
-            
-            with open(script_path, "w", encoding="utf-8") as f:
-                f.write(self.BLENDER_SCRIPT)
-
-            cmd = [
-                blender_path, "-b", "-noaudio",
-                "--python", script_path, "--",
-                actual_mesh_path, out_path,
-                str(final_scale.x), str(final_scale.y), str(final_scale.z),
-                bbox_path, scale_info_path
-            ]
-            
-            print(f"[Node] 执行Blender命令...")
-            proc = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-            
-            # 打印Blender输出以便调试
-            if proc.stdout:
-                print(f"[Node] Blender输出:\n{proc.stdout}")
-            if proc.stderr:
-                print(f"[Node] Blender错误:\n{proc.stderr}")
-            
-            if proc.returncode != 0:
-                raise Exception(f"Blender 执行失败 (返回码: {proc.returncode})：\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
-
-            # 检查文件是否存在
-            if not os.path.exists(bbox_path):
-                raise Exception(f"Blender没有生成bbox文件: {bbox_path}")
-            if not os.path.exists(scale_info_path):
-                raise Exception(f"Blender没有生成scale_info文件: {scale_info_path}")
-
-            # 读取结果
-            with open(bbox_path, "r", encoding="utf-8") as f:
-                bbox_json = f.read()
-                
-            with open(scale_info_path, "r", encoding="utf-8") as f:
-                scale_info_data = json.load(f)
-            
-            # 添加算法信息到scale_info
-            scale_info_data["algorithm_info"] = {
-                "method": "smart_scaling",
-                "target_size": [target_size_x, target_size_y, target_size_z],
-                "force_exact_alignment": force_exact_alignment,
-                "initial_bbox": [initial_bbox.x, initial_bbox.y, initial_bbox.z],
-                "calculated_scale": [final_scale.x, final_scale.y, final_scale.z]
-            }
-            
-            # 添加输入源信息
-            is_url_input = bool(model_url and model_url.strip())
-            final_input = model_url.strip() if is_url_input else mesh_path
-            scale_info_data["input_info"] = {
-                "source_type": "url_download" if is_url_input else "local_file",
-                "original_mesh_path": mesh_path,
-                "actual_mesh_path": actual_mesh_path,
-                "model_url": model_url.strip() if model_url else None,
-                "is_url": is_url_input,
-                "final_input": final_input
-            }
-            
-            # 打印材质信息
-            print(f"[Node] 材质信息:")
-            print(f"  - 材质数量: {scale_info_data.get('material_count', 0)}")
-            print(f"  - 贴图数量: {scale_info_data.get('texture_count', 0)}")
-            print(f"  - 材质保留: {scale_info_data.get('materials_preserved', False)}")
-            
-            scale_info_json = json.dumps(scale_info_data, indent=2, ensure_ascii=False)
-        
-        print(f"[Node] 处理完成！输出文件: {out_path}")
-        print(f"=== VVL智能模型缩放器 结束 ===\n")
-        
-        return (out_path, bbox_json, scale_info_json)
+        # 返回一个包含旋转和缩放的字典
+        params = {
+            'rotation': (rotation_x_offset, rotation_y_offset, rotation_z_offset),
+            'scale': (scale_x_multiplier, scale_y_multiplier, scale_z_multiplier)
+        }
+        return (params,)
 
 
 class BlenderSmartModelScalerBatch:
@@ -826,6 +513,28 @@ class BlenderSmartModelScalerBatch:
     ├── obj_001/
     │   ├── 001_模型名称.fbx
     │   └── textures/
+    
+    ⚡ 处理流程（每个模型）：
+    1. 导入原始模型
+    2. 应用额外旋转（ModelTransformParameters，如果连接）
+    3. 应用额外缩放（ModelTransformParameters，如果连接）
+    4. 叠加变换到JSON（将额外旋转叠加到rotation字段，额外缩放乘以scale字段）
+    5. 计算包围盒
+    6. 基于更新后的JSON创建参考Box并计算对齐旋转
+    7. 应用智能缩放（基于JSON的scale值）
+    8. 导出处理后的模型
+    
+    📝 重要说明：
+    • 对齐旋转**只用于计算**，不应用到模型
+    • 计算出的旋转角度会更新到输出JSON的rotation字段
+    • 模型在导出时**不包含对齐旋转**，只包含智能缩放
+    • 这样做是为了在外部系统中通过rotation字段控制模型朝向
+    
+    💡 提示：
+    • transform_params（可选）：从 ModelTransformParameters 节点连接
+    • 额外变换在最开始应用到模型，然后叠加到JSON数据中
+    • 后续的对齐计算基于更新后的JSON数据进行
+    • 与v1版本向后兼容
     """
     
     # 包含对齐功能的 Blender 脚本
@@ -837,15 +546,19 @@ from mathutils import Vector, Matrix
 _EPS = 1e-8
 
 argv = sys.argv[sys.argv.index("--")+1:]
-in_path, out_path, sx, sy, sz, ref_scale_x, ref_scale_y, ref_scale_z, ref_rot_x, ref_rot_y, ref_rot_z, bbox_path, scale_info_path, alignment_path = argv
+in_path, out_path, sx, sy, sz, ref_scale_x, ref_scale_y, ref_scale_z, ref_rot_x, ref_rot_y, ref_rot_z, additional_rot_x, additional_rot_y, additional_rot_z, additional_scale_x, additional_scale_y, additional_scale_z, bbox_path, scale_info_path, alignment_path = argv
 sx, sy, sz = float(sx), float(sy), float(sz)
 ref_scale_x, ref_scale_y, ref_scale_z = float(ref_scale_x), float(ref_scale_y), float(ref_scale_z)  # 参考box的scale值
 ref_rot_x, ref_rot_y, ref_rot_z = float(ref_rot_x), float(ref_rot_y), float(ref_rot_z)  # 参考box的rotation值（度）
+additional_rot_x, additional_rot_y, additional_rot_z = float(additional_rot_x), float(additional_rot_y), float(additional_rot_z)  # 额外旋转偏移（度）
+additional_scale_x, additional_scale_y, additional_scale_z = float(additional_scale_x), float(additional_scale_y), float(additional_scale_z)  # 额外缩放乘数
 
 print(f"[Blender] 开始处理模型: {in_path}")
 print(f"[Blender] 应用缩放: sx={sx:.3f}, sy={sy:.3f}, sz={sz:.3f}")
 print(f"[Blender] 参考Box的Scale: ({ref_scale_x:.1f}, {ref_scale_y:.1f}, {ref_scale_z:.1f})")
 print(f"[Blender] 参考Box的Rotation: ({ref_rot_x:.1f}°, {ref_rot_y:.1f}°, {ref_rot_z:.1f}°)")
+print(f"[Blender] 额外旋转偏移: X={additional_rot_x:.1f}°, Y={additional_rot_y:.1f}°, Z={additional_rot_z:.1f}°")
+print(f"[Blender] 额外缩放乘数: X={additional_scale_x:.3f}, Y={additional_scale_y:.3f}, Z={additional_scale_z:.3f}")
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
@@ -885,7 +598,41 @@ if lower.endswith((".glb", ".gltf")):
 meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH']
 print(f"[Blender] 找到 {len(meshes)} 个网格对象")
 
-# 计算原始包围盒
+# ===== 步骤1: 应用 ModelTransformParameters 的变换（最先执行） =====
+# 应用额外的旋转偏移（如果有）
+if meshes and (abs(additional_rot_x) > 0.01 or abs(additional_rot_y) > 0.01 or abs(additional_rot_z) > 0.01):
+    print(f"\n[Blender] [步骤1a] 应用额外旋转（ModelTransformParameters）...")
+    additional_rotation_radians = (math.radians(additional_rot_x), math.radians(additional_rot_y), math.radians(additional_rot_z))
+    
+    for o in meshes:
+        o.select_set(True)
+        o.rotation_euler.x += additional_rotation_radians[0]
+        o.rotation_euler.y += additional_rotation_radians[1]
+        o.rotation_euler.z += additional_rotation_radians[2]
+        print(f"[Blender] 对象 '{o.name}' 旋转: X={math.degrees(o.rotation_euler.x):.1f}°, Y={math.degrees(o.rotation_euler.y):.1f}°, Z={math.degrees(o.rotation_euler.z):.1f}°")
+    
+    # 烘焙旋转到顶点
+    bpy.context.view_layer.objects.active = meshes[0] if meshes else None
+    print(f"[Blender] 烘焙旋转到顶点...")
+    bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+
+# 应用额外的缩放乘数（如果有）
+if meshes and (abs(additional_scale_x - 1.0) > 0.001 or abs(additional_scale_y - 1.0) > 0.001 or abs(additional_scale_z - 1.0) > 0.001):
+    print(f"\n[Blender] [步骤1b] 应用额外缩放（ModelTransformParameters）...")
+    
+    for o in meshes:
+        o.select_set(True)
+        original_scale = o.scale.copy()
+        o.scale = (o.scale[0] * additional_scale_x, o.scale[1] * additional_scale_y, o.scale[2] * additional_scale_z)
+        print(f"[Blender] 对象 '{o.name}' 额外缩放: {original_scale} -> {o.scale}")
+    
+    # 烘焙缩放到顶点
+    bpy.context.view_layer.objects.active = meshes[0] if meshes else None
+    print(f"[Blender] 烘焙额外缩放到顶点...")
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+# ===== 步骤2: 计算原始包围盒（在应用额外变换之后） =====
+print(f"\n[Blender] [步骤2] 计算原始包围盒...")
 original_gmin = Vector(( math.inf,  math.inf,  math.inf))
 original_gmax = Vector((-math.inf, -math.inf, -math.inf))
 for o in meshes:
@@ -901,8 +648,27 @@ for o in meshes:
 original_size = [original_gmax[i] - original_gmin[i] for i in range(3)]
 print(f"[Blender] 原始包围盒尺寸: ({original_size[0]:.2f}, {original_size[1]:.2f}, {original_size[2]:.2f})")
 
-# ===== 对齐计算开始 =====
-print(f"\n[Blender] 开始计算对齐旋转...")
+# ===== 步骤3: 将额外变换叠加回JSON数据 =====
+print(f"\n[Blender] [步骤3] 叠加额外变换到JSON数据...")
+
+# 将额外旋转叠加到 JSON 的 rotation 字段
+updated_ref_rot_x = ref_rot_x + additional_rot_x
+updated_ref_rot_y = ref_rot_y + additional_rot_y
+updated_ref_rot_z = ref_rot_z + additional_rot_z
+print(f"[Blender] 原始 rotation: X={ref_rot_x:.1f}°, Y={ref_rot_y:.1f}°, Z={ref_rot_z:.1f}°")
+print(f"[Blender] 额外 rotation: X={additional_rot_x:.1f}°, Y={additional_rot_y:.1f}°, Z={additional_rot_z:.1f}°")
+print(f"[Blender] 更新后 rotation: X={updated_ref_rot_x:.1f}°, Y={updated_ref_rot_y:.1f}°, Z={updated_ref_rot_z:.1f}°")
+
+# 将额外缩放乘以 JSON 的 scale 字段
+updated_ref_scale_x = ref_scale_x * additional_scale_x
+updated_ref_scale_y = ref_scale_y * additional_scale_y
+updated_ref_scale_z = ref_scale_z * additional_scale_z
+print(f"[Blender] 原始 scale: X={ref_scale_x:.3f}, Y={ref_scale_y:.3f}, Z={ref_scale_z:.3f}")
+print(f"[Blender] 额外 scale: X={additional_scale_x:.3f}, Y={additional_scale_y:.3f}, Z={additional_scale_z:.3f}")
+print(f"[Blender] 更新后 scale: X={updated_ref_scale_x:.3f}, Y={updated_ref_scale_y:.3f}, Z={updated_ref_scale_z:.3f}")
+
+# ===== 步骤4: 对齐计算和智能缩放（基于更新后的JSON数据） =====
+print(f"\n[Blender] [步骤4] 开始计算对齐旋转（基于更新后的JSON）...")
 
 # 创建参考 Box
 print(f"[Blender] 创建参考 Box...")
@@ -911,11 +677,11 @@ bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
 ref_box = bpy.context.active_object
 ref_box.name = "Reference_Box"
 
-# 直接应用 scale 值（与JSON中的scale字段对应）
-ref_box.scale = (ref_scale_x, ref_scale_y, ref_scale_z)
+# 使用更新后的 scale 值
+ref_box.scale = (updated_ref_scale_x, updated_ref_scale_y, updated_ref_scale_z)
 
-# 应用rotation值（需要转换为弧度）
-ref_box.rotation_euler = (math.radians(ref_rot_x), math.radians(ref_rot_y), math.radians(ref_rot_z))
+# 使用更新后的 rotation 值（需要转换为弧度）
+ref_box.rotation_euler = (math.radians(updated_ref_rot_x), math.radians(updated_ref_rot_y), math.radians(updated_ref_rot_z))
 
 bpy.context.view_layer.update()
 
@@ -964,6 +730,7 @@ if is_already_aligned:
 if is_already_aligned:
     rotation_degrees = [0.0, 0.0, 0.0]
     rotation_radians = [0.0, 0.0, 0.0]
+    final_rotation_matrix = Matrix.Identity(3)  # 单位矩阵，表示无旋转
     print(f"  计算的旋转角度: X=0.0° Y=0.0° Z=0.0° (保持原始方向)")
 else:
     # 基于轴映射构建旋转矩阵
@@ -1008,12 +775,18 @@ alignment_info = {
         "Z": "XYZ"[axis_mapping[2]]
     },
     "ref_box": {
-        "scale": [ref_scale_x, ref_scale_y, ref_scale_z],
-        "rotation": [ref_rot_x, ref_rot_y, ref_rot_z],
+        "original_scale": [ref_scale_x, ref_scale_y, ref_scale_z],
+        "original_rotation": [ref_rot_x, ref_rot_y, ref_rot_z],
+        "updated_scale": [updated_ref_scale_x, updated_ref_scale_y, updated_ref_scale_z],
+        "updated_rotation": [updated_ref_rot_x, updated_ref_rot_y, updated_ref_rot_z],
         "dimensions": ref_sizes
     },
     "model_sizes": tgt_sizes,
-    "is_already_aligned": is_already_aligned
+    "is_already_aligned": is_already_aligned,
+    "transform_applied": {
+        "additional_rotation": [additional_rot_x, additional_rot_y, additional_rot_z],
+        "additional_scale": [additional_scale_x, additional_scale_y, additional_scale_z]
+    }
 }
 
 # 只有在需要旋转时才添加置换矩阵信息
@@ -1022,7 +795,8 @@ if not is_already_aligned:
 
 # ===== 对齐计算结束 =====
 
-# 应用缩放（但不应用旋转）
+# 应用智能缩放
+print(f"\n[Blender] 应用智能缩放...")
 for o in meshes:
     o.select_set(True)
     original_scale = o.scale.copy()
@@ -1032,8 +806,17 @@ for o in meshes:
 # 烘焙缩放到顶点
 bpy.context.view_layer.objects.active = meshes[0] if meshes else None
 if meshes:
-    print(f"[Blender] 烘焙缩放到顶点...")
+    print(f"[Blender] 烘焙智能缩放到顶点...")
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+# 注意：对齐旋转不应用到模型，只用于计算并更新JSON中的rotation字段
+# 这与v1版本的行为保持一致
+if is_already_aligned:
+    print(f"\n[Blender] 模型已对齐，rotation字段将保持不变")
+else:
+    print(f"\n[Blender] 模型需要旋转对齐，计算的rotation角度将更新到JSON")
+    print(f"  - 计算的rotation: X={rotation_degrees[0]:.1f}°, Y={rotation_degrees[1]:.1f}°, Z={rotation_degrees[2]:.1f}°")
+    print(f"  - 注意：旋转角度仅用于更新JSON，不应用到Blender模型")
 
 # 计算缩放后的全局 AABB
 gmin = Vector(( math.inf,  math.inf,  math.inf))
@@ -1078,7 +861,11 @@ scale_info = {
     "scale_applied_to_vertices": True,
     "material_count": material_count,
     "texture_count": texture_count,
-    "materials_preserved": (texture_count > 0 or material_count > 0)
+    "materials_preserved": (texture_count > 0 or material_count > 0),
+    "additional_rotation_applied": [additional_rot_x, additional_rot_y, additional_rot_z],
+    "rotation_applied_to_vertices": (abs(additional_rot_x) > 0.01 or abs(additional_rot_y) > 0.01 or abs(additional_rot_z) > 0.01),
+    "additional_scale_applied": [additional_scale_x, additional_scale_y, additional_scale_z],
+    "additional_scale_applied_to_vertices": (abs(additional_scale_x - 1.0) > 0.001 or abs(additional_scale_y - 1.0) > 0.001 or abs(additional_scale_z - 1.0) > 0.001)
 }
 
 # 保存临时结果
@@ -1153,6 +940,7 @@ print(f"[Blender] 处理完成！")
             },
             "optional": {
                 "max_workers": ("INT", {"default": 4, "min": 1, "max": 32, "tooltip": "最大并行处理线程数。每个模型有独立输出目录，理论上支持高并发。建议根据CPU核心数和内存大小调整"}),
+                "transform_params": ("TRANSFORM_PARAMS", {"tooltip": "变换参数\n从 ModelTransformParameters 节点连接\n包含旋转偏移和缩放乘数\n应用在智能缩放之后"}),
             }
         }
 
@@ -1168,7 +956,9 @@ print(f"[Blender] 处理完成！")
     def _process_with_alignment(self, mesh_path: str, ref_scale_x: float, ref_scale_y: float, 
                               ref_scale_z: float, ref_rot_x: float, ref_rot_y: float, ref_rot_z: float,
                               sx: float, sy: float, sz: float,
-                              blender_path: str, output_path: str):
+                              blender_path: str, output_path: str,
+                              additional_rot_x: float = 0.0, additional_rot_y: float = 0.0, additional_rot_z: float = 0.0,
+                              additional_scale_x: float = 1.0, additional_scale_y: float = 1.0, additional_scale_z: float = 1.0):
         """使用带对齐功能的Blender脚本处理模型"""
         
         with tempfile.TemporaryDirectory() as td:
@@ -1187,6 +977,8 @@ print(f"[Blender] 处理完成！")
                 str(sx), str(sy), str(sz),
                 str(ref_scale_x), str(ref_scale_y), str(ref_scale_z),
                 str(ref_rot_x), str(ref_rot_y), str(ref_rot_z),
+                str(additional_rot_x), str(additional_rot_y), str(additional_rot_z),
+                str(additional_scale_x), str(additional_scale_y), str(additional_scale_z),
                 bbox_path, scale_info_path, alignment_path
             ]
             
@@ -1239,7 +1031,9 @@ print(f"[Blender] 处理完成！")
         return ext
     
     def _process_single_object(self, obj_data: dict, index: int, force_exact_alignment: bool, 
-                              blender_path: str) -> dict:
+                              blender_path: str, rotation_x_offset: float = 0.0, rotation_y_offset: float = 0.0, 
+                              rotation_z_offset: float = 0.0, scale_x_multiplier: float = 1.0, 
+                              scale_y_multiplier: float = 1.0, scale_z_multiplier: float = 1.0) -> dict:
         """处理单个对象"""
         result = {
             "index": index,
@@ -1337,14 +1131,16 @@ print(f"[Blender] 处理完成！")
                 os.makedirs(out_dir_for_file, exist_ok=True)
                 
                 # 使用带对齐功能的处理
-                # 传递原始的scale和rotation值
+                # 传递原始的scale和rotation值，以及额外的旋转和缩放参数
                 bbox_data, scale_info_data, alignment_data = self._process_with_alignment(
                     downloaded_path,
                     float(scale[0]), float(scale[1]), float(scale[2]),  # 原始scale值
                     float(rotation[0]), float(rotation[1]), float(rotation[2]),  # 原始rotation值
                     final_scale.x, final_scale.y, final_scale.z,
                     blender_path,
-                    output_path
+                    output_path,
+                    rotation_x_offset, rotation_y_offset, rotation_z_offset,  # 额外旋转偏移
+                    scale_x_multiplier, scale_y_multiplier, scale_z_multiplier  # 额外缩放乘数
                 )
                 
                 if not bbox_data or not scale_info_data or not alignment_data:
@@ -1403,11 +1199,47 @@ print(f"[Blender] 处理完成！")
         return result
     
     def process_batch(self, json_text: str, force_exact_alignment: bool, blender_path: str, 
-                     max_workers: int = 4, **kwargs):
+                     max_workers: int = 4, transform_params=None, **kwargs):
         """批量处理JSON中的所有3D模型"""
+        
+        # 解析变换参数
+        if transform_params is not None and isinstance(transform_params, dict):
+            # 解析旋转参数
+            rotation = transform_params.get('rotation', (0.0, 0.0, 0.0))
+            if isinstance(rotation, (tuple, list)) and len(rotation) >= 3:
+                rotation_x_offset = float(rotation[0])
+                rotation_y_offset = float(rotation[1])
+                rotation_z_offset = float(rotation[2])
+            else:
+                rotation_x_offset = 0.0
+                rotation_y_offset = 0.0
+                rotation_z_offset = 0.0
+            
+            # 解析缩放参数
+            scale = transform_params.get('scale', (1.0, 1.0, 1.0))
+            if isinstance(scale, (tuple, list)) and len(scale) >= 3:
+                scale_x_multiplier = float(scale[0])
+                scale_y_multiplier = float(scale[1])
+                scale_z_multiplier = float(scale[2])
+            else:
+                scale_x_multiplier = 1.0
+                scale_y_multiplier = 1.0
+                scale_z_multiplier = 1.0
+        else:
+            # 默认值
+            rotation_x_offset = 0.0
+            rotation_y_offset = 0.0
+            rotation_z_offset = 0.0
+            scale_x_multiplier = 1.0
+            scale_y_multiplier = 1.0
+            scale_z_multiplier = 1.0
         
         print(f"\n=== VVL智能模型批量缩放器 开始处理 ===")
         print(f"[Batch] 最大并行线程数: {max_workers}")
+        if rotation_x_offset != 0.0 or rotation_y_offset != 0.0 or rotation_z_offset != 0.0:
+            print(f"[Batch] 额外旋转偏移: X={rotation_x_offset}°, Y={rotation_y_offset}°, Z={rotation_z_offset}°")
+        if scale_x_multiplier != 1.0 or scale_y_multiplier != 1.0 or scale_z_multiplier != 1.0:
+            print(f"[Batch] 额外缩放乘数: X={scale_x_multiplier}, Y={scale_y_multiplier}, Z={scale_z_multiplier}")
         
         try:
             # 解析JSON输入
@@ -1447,7 +1279,13 @@ print(f"[Blender] 处理完成！")
                         obj,
                         index,
                         force_exact_alignment,
-                        blender_path
+                        blender_path,
+                        rotation_x_offset,
+                        rotation_y_offset,
+                        rotation_z_offset,
+                        scale_x_multiplier,
+                        scale_y_multiplier,
+                        scale_z_multiplier
                     )
                     future_to_index[future] = index
                 
