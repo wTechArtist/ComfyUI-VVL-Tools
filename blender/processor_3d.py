@@ -372,23 +372,26 @@ class ModelTransformParameters:
     只负责设置和传递变换参数，不进行实际的模型处理：
     • 输出旋转偏移量（度）
     • 输出缩放乘数
+    • 🆕 控制旋转和缩放的应用方式（模型/JSON/两者）
     • 可以连接到 BlenderSmartModelScalerBatch 节点
     • 轻量级节点，无需 Blender
     
     🎯 功能：
     • 设置 X/Y/Z 轴的旋转偏移量
     • 设置 X/Y/Z 轴的缩放乘数
+    • 选择应用模式（仅模型/仅JSON/两者）
     • 输出变换参数供 BlenderSmartModelScalerBatch 使用
     
     📝 使用方式：
     1. 设置所需的旋转和缩放参数
-    2. 将输出连接到 BlenderSmartModelScalerBatch 节点
-    3. BlenderSmartModelScalerBatch 会在最开始应用这些变换
+    2. 选择应用模式（仅模型/仅JSON/两者）
+    3. 将输出连接到 BlenderSmartModelScalerBatch 节点
+    4. BlenderSmartModelScalerBatch 会根据应用模式处理这些变换
     
     ⚡ 执行顺序（在 BlenderSmartModelScalerBatch 中）：
-    1. 应用额外旋转（本节点的旋转参数）
-    2. 应用额外缩放（本节点的缩放参数）
-    3. 叠加变换到JSON数据（rotation和scale字段）
+    1. 应用额外旋转（根据rotation_apply_mode）
+    2. 应用额外缩放（根据scale_apply_mode）
+    3. 叠加变换到JSON数据（根据rotation_apply_mode和scale_apply_mode）
     4. 计算包围盒
     5. 基于更新后的JSON计算对齐和智能缩放
     6. 应用智能缩放和对齐旋转
@@ -396,6 +399,7 @@ class ModelTransformParameters:
     ⚙️ 参数范围：
     • 旋转：-360° 到 +360°，步进 0.1°
     • 缩放：0.001 到 1000，步进 0.001
+    • 应用模式：仅模型本身/仅叠加JSON/两者都应用
     """
     
     @classmethod
@@ -423,6 +427,10 @@ class ModelTransformParameters:
                     "step": 0.1,
                     "tooltip": "Z轴旋转偏移量（度）\n正值：绕Z轴正方向旋转\n负值：绕Z轴负方向旋转"
                 }),
+                "rotation_apply_mode": (["应用在模型本身+叠加在JSON上", "仅应用在模型本身", "仅叠加在JSON上"], {
+                    "default": "仅叠加在JSON上",
+                    "tooltip": "旋转应用模式：\n• 应用在模型本身+叠加在JSON上：旋转会烘焙到模型顶点，同时更新JSON的rotation字段\n• 仅应用在模型本身：旋转只烘焙到模型顶点，不修改JSON的rotation字段\n• 仅叠加在JSON上：旋转只更新JSON的rotation字段，不应用到模型顶点"
+                }),
                 "scale_x_multiplier": ("FLOAT", {
                     "default": 1.0, 
                     "min": 0.001, 
@@ -444,6 +452,10 @@ class ModelTransformParameters:
                     "step": 0.001,
                     "tooltip": "Z轴缩放乘数\n1.0：保持原尺寸\n0.5：缩小一半\n2.0：放大一倍"
                 }),
+                "scale_apply_mode": (["应用在模型本身+叠加在JSON上", "仅应用在模型本身", "仅叠加在JSON上"], {
+                    "default": "仅叠加在JSON上",
+                    "tooltip": "缩放应用模式：\n• 应用在模型本身+叠加在JSON上：缩放会烘焙到模型顶点，同时更新JSON的scale字段\n• 仅应用在模型本身：缩放只烘焙到模型顶点，不修改JSON的scale字段\n• 仅叠加在JSON上：缩放只更新JSON的scale字段，不应用到模型顶点"
+                }),
             },
         }
     
@@ -452,16 +464,20 @@ class ModelTransformParameters:
     FUNCTION = "output_transform"
     CATEGORY = "VVL/3D"
     
-    def output_transform(self, rotation_x_offset, rotation_y_offset, rotation_z_offset,
-                        scale_x_multiplier, scale_y_multiplier, scale_z_multiplier, **kwargs):
-        """输出变换参数（旋转+缩放）"""
+    def output_transform(self, rotation_x_offset, rotation_y_offset, rotation_z_offset, rotation_apply_mode,
+                        scale_x_multiplier, scale_y_multiplier, scale_z_multiplier, scale_apply_mode, **kwargs):
+        """输出变换参数（旋转+缩放+应用模式）"""
         print(f"[Transform] 旋转参数: X={rotation_x_offset}°, Y={rotation_y_offset}°, Z={rotation_z_offset}°")
+        print(f"[Transform] 旋转应用模式: {rotation_apply_mode}")
         print(f"[Transform] 缩放参数: X={scale_x_multiplier}, Y={scale_y_multiplier}, Z={scale_z_multiplier}")
+        print(f"[Transform] 缩放应用模式: {scale_apply_mode}")
         
-        # 返回一个包含旋转和缩放的字典
+        # 返回一个包含旋转、缩放和应用模式的字典
         params = {
             'rotation': (rotation_x_offset, rotation_y_offset, rotation_z_offset),
-            'scale': (scale_x_multiplier, scale_y_multiplier, scale_z_multiplier)
+            'rotation_apply_mode': rotation_apply_mode,
+            'scale': (scale_x_multiplier, scale_y_multiplier, scale_z_multiplier),
+            'scale_apply_mode': scale_apply_mode
         }
         return (params,)
 
@@ -546,19 +562,23 @@ from mathutils import Vector, Matrix
 _EPS = 1e-8
 
 argv = sys.argv[sys.argv.index("--")+1:]
-in_path, out_path, sx, sy, sz, ref_scale_x, ref_scale_y, ref_scale_z, ref_rot_x, ref_rot_y, ref_rot_z, additional_rot_x, additional_rot_y, additional_rot_z, additional_scale_x, additional_scale_y, additional_scale_z, bbox_path, scale_info_path, alignment_path = argv
+in_path, out_path, sx, sy, sz, ref_scale_x, ref_scale_y, ref_scale_z, ref_rot_x, ref_rot_y, ref_rot_z, additional_rot_x, additional_rot_y, additional_rot_z, additional_scale_x, additional_scale_y, additional_scale_z, rotation_apply_mode, scale_apply_mode, bbox_path, scale_info_path, alignment_path = argv
 sx, sy, sz = float(sx), float(sy), float(sz)
 ref_scale_x, ref_scale_y, ref_scale_z = float(ref_scale_x), float(ref_scale_y), float(ref_scale_z)  # 参考box的scale值
 ref_rot_x, ref_rot_y, ref_rot_z = float(ref_rot_x), float(ref_rot_y), float(ref_rot_z)  # 参考box的rotation值（度）
 additional_rot_x, additional_rot_y, additional_rot_z = float(additional_rot_x), float(additional_rot_y), float(additional_rot_z)  # 额外旋转偏移（度）
 additional_scale_x, additional_scale_y, additional_scale_z = float(additional_scale_x), float(additional_scale_y), float(additional_scale_z)  # 额外缩放乘数
+# rotation_apply_mode: 'both', 'model_only', 'json_only'
+# scale_apply_mode: 'both', 'model_only', 'json_only'
 
 print(f"[Blender] 开始处理模型: {in_path}")
 print(f"[Blender] 应用缩放: sx={sx:.3f}, sy={sy:.3f}, sz={sz:.3f}")
 print(f"[Blender] 参考Box的Scale: ({ref_scale_x:.1f}, {ref_scale_y:.1f}, {ref_scale_z:.1f})")
 print(f"[Blender] 参考Box的Rotation: ({ref_rot_x:.1f}°, {ref_rot_y:.1f}°, {ref_rot_z:.1f}°)")
 print(f"[Blender] 额外旋转偏移: X={additional_rot_x:.1f}°, Y={additional_rot_y:.1f}°, Z={additional_rot_z:.1f}°")
+print(f"[Blender] 旋转应用模式: {rotation_apply_mode}")
 print(f"[Blender] 额外缩放乘数: X={additional_scale_x:.3f}, Y={additional_scale_y:.3f}, Z={additional_scale_z:.3f}")
+print(f"[Blender] 缩放应用模式: {scale_apply_mode}")
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
@@ -599,9 +619,11 @@ meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH']
 print(f"[Blender] 找到 {len(meshes)} 个网格对象")
 
 # ===== 步骤1: 应用 ModelTransformParameters 的变换（最先执行） =====
-# 应用额外的旋转偏移（如果有）
-if meshes and (abs(additional_rot_x) > 0.01 or abs(additional_rot_y) > 0.01 or abs(additional_rot_z) > 0.01):
-    print(f"\n[Blender] [步骤1a] 应用额外旋转（ModelTransformParameters）...")
+# 应用额外的旋转偏移（根据rotation_apply_mode判断是否应用到模型）
+should_apply_rotation_to_model = (rotation_apply_mode in ['both', 'model_only'])
+if meshes and should_apply_rotation_to_model and (abs(additional_rot_x) > 0.01 or abs(additional_rot_y) > 0.01 or abs(additional_rot_z) > 0.01):
+    print(f"\n[Blender] [步骤1a] 应用额外旋转到模型（ModelTransformParameters）...")
+    print(f"[Blender] 应用模式: {rotation_apply_mode}")
     additional_rotation_radians = (math.radians(additional_rot_x), math.radians(additional_rot_y), math.radians(additional_rot_z))
     
     for o in meshes:
@@ -615,10 +637,14 @@ if meshes and (abs(additional_rot_x) > 0.01 or abs(additional_rot_y) > 0.01 or a
     bpy.context.view_layer.objects.active = meshes[0] if meshes else None
     print(f"[Blender] 烘焙旋转到顶点...")
     bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+elif meshes and not should_apply_rotation_to_model and (abs(additional_rot_x) > 0.01 or abs(additional_rot_y) > 0.01 or abs(additional_rot_z) > 0.01):
+    print(f"\n[Blender] [步骤1a] 跳过应用额外旋转到模型（rotation_apply_mode={rotation_apply_mode}）")
 
-# 应用额外的缩放乘数（如果有）
-if meshes and (abs(additional_scale_x - 1.0) > 0.001 or abs(additional_scale_y - 1.0) > 0.001 or abs(additional_scale_z - 1.0) > 0.001):
-    print(f"\n[Blender] [步骤1b] 应用额外缩放（ModelTransformParameters）...")
+# 应用额外的缩放乘数（根据scale_apply_mode判断是否应用到模型）
+should_apply_scale_to_model = (scale_apply_mode in ['both', 'model_only'])
+if meshes and should_apply_scale_to_model and (abs(additional_scale_x - 1.0) > 0.001 or abs(additional_scale_y - 1.0) > 0.001 or abs(additional_scale_z - 1.0) > 0.001):
+    print(f"\n[Blender] [步骤1b] 应用额外缩放到模型（ModelTransformParameters）...")
+    print(f"[Blender] 应用模式: {scale_apply_mode}")
     
     for o in meshes:
         o.select_set(True)
@@ -630,6 +656,8 @@ if meshes and (abs(additional_scale_x - 1.0) > 0.001 or abs(additional_scale_y -
     bpy.context.view_layer.objects.active = meshes[0] if meshes else None
     print(f"[Blender] 烘焙额外缩放到顶点...")
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+elif meshes and not should_apply_scale_to_model and (abs(additional_scale_x - 1.0) > 0.001 or abs(additional_scale_y - 1.0) > 0.001 or abs(additional_scale_z - 1.0) > 0.001):
+    print(f"\n[Blender] [步骤1b] 跳过应用额外缩放到模型（scale_apply_mode={scale_apply_mode}）")
 
 # ===== 步骤2: 计算原始包围盒（在应用额外变换之后） =====
 print(f"\n[Blender] [步骤2] 计算原始包围盒...")
@@ -648,24 +676,46 @@ for o in meshes:
 original_size = [original_gmax[i] - original_gmin[i] for i in range(3)]
 print(f"[Blender] 原始包围盒尺寸: ({original_size[0]:.2f}, {original_size[1]:.2f}, {original_size[2]:.2f})")
 
-# ===== 步骤3: 将额外变换叠加回JSON数据 =====
+# ===== 步骤3: 将额外变换叠加回JSON数据（根据应用模式） =====
 print(f"\n[Blender] [步骤3] 叠加额外变换到JSON数据...")
 
-# 将额外旋转叠加到 JSON 的 rotation 字段
-updated_ref_rot_x = ref_rot_x + additional_rot_x
-updated_ref_rot_y = ref_rot_y + additional_rot_y
-updated_ref_rot_z = ref_rot_z + additional_rot_z
-print(f"[Blender] 原始 rotation: X={ref_rot_x:.1f}°, Y={ref_rot_y:.1f}°, Z={ref_rot_z:.1f}°")
-print(f"[Blender] 额外 rotation: X={additional_rot_x:.1f}°, Y={additional_rot_y:.1f}°, Z={additional_rot_z:.1f}°")
-print(f"[Blender] 更新后 rotation: X={updated_ref_rot_x:.1f}°, Y={updated_ref_rot_y:.1f}°, Z={updated_ref_rot_z:.1f}°")
+# 判断是否需要叠加旋转到JSON
+should_apply_rotation_to_json = (rotation_apply_mode in ['both', 'json_only'])
+if should_apply_rotation_to_json:
+    # 将额外旋转叠加到 JSON 的 rotation 字段
+    updated_ref_rot_x = ref_rot_x + additional_rot_x
+    updated_ref_rot_y = ref_rot_y + additional_rot_y
+    updated_ref_rot_z = ref_rot_z + additional_rot_z
+    print(f"[Blender] 叠加旋转到JSON（rotation_apply_mode={rotation_apply_mode}）:")
+    print(f"  原始 rotation: X={ref_rot_x:.1f}°, Y={ref_rot_y:.1f}°, Z={ref_rot_z:.1f}°")
+    print(f"  额外 rotation: X={additional_rot_x:.1f}°, Y={additional_rot_y:.1f}°, Z={additional_rot_z:.1f}°")
+    print(f"  更新后 rotation: X={updated_ref_rot_x:.1f}°, Y={updated_ref_rot_y:.1f}°, Z={updated_ref_rot_z:.1f}°")
+else:
+    # 不叠加旋转到JSON，保持原值
+    updated_ref_rot_x = ref_rot_x
+    updated_ref_rot_y = ref_rot_y
+    updated_ref_rot_z = ref_rot_z
+    print(f"[Blender] 跳过叠加旋转到JSON（rotation_apply_mode={rotation_apply_mode}）")
+    print(f"  保持原始 rotation: X={ref_rot_x:.1f}°, Y={ref_rot_y:.1f}°, Z={ref_rot_z:.1f}°")
 
-# 将额外缩放乘以 JSON 的 scale 字段
-updated_ref_scale_x = ref_scale_x * additional_scale_x
-updated_ref_scale_y = ref_scale_y * additional_scale_y
-updated_ref_scale_z = ref_scale_z * additional_scale_z
-print(f"[Blender] 原始 scale: X={ref_scale_x:.3f}, Y={ref_scale_y:.3f}, Z={ref_scale_z:.3f}")
-print(f"[Blender] 额外 scale: X={additional_scale_x:.3f}, Y={additional_scale_y:.3f}, Z={additional_scale_z:.3f}")
-print(f"[Blender] 更新后 scale: X={updated_ref_scale_x:.3f}, Y={updated_ref_scale_y:.3f}, Z={updated_ref_scale_z:.3f}")
+# 判断是否需要叠加缩放到JSON
+should_apply_scale_to_json = (scale_apply_mode in ['both', 'json_only'])
+if should_apply_scale_to_json:
+    # 将额外缩放乘以 JSON 的 scale 字段
+    updated_ref_scale_x = ref_scale_x * additional_scale_x
+    updated_ref_scale_y = ref_scale_y * additional_scale_y
+    updated_ref_scale_z = ref_scale_z * additional_scale_z
+    print(f"[Blender] 叠加缩放到JSON（scale_apply_mode={scale_apply_mode}）:")
+    print(f"  原始 scale: X={ref_scale_x:.3f}, Y={ref_scale_y:.3f}, Z={ref_scale_z:.3f}")
+    print(f"  额外 scale: X={additional_scale_x:.3f}, Y={additional_scale_y:.3f}, Z={additional_scale_z:.3f}")
+    print(f"  更新后 scale: X={updated_ref_scale_x:.3f}, Y={updated_ref_scale_y:.3f}, Z={updated_ref_scale_z:.3f}")
+else:
+    # 不叠加缩放到JSON，保持原值
+    updated_ref_scale_x = ref_scale_x
+    updated_ref_scale_y = ref_scale_y
+    updated_ref_scale_z = ref_scale_z
+    print(f"[Blender] 跳过叠加缩放到JSON（scale_apply_mode={scale_apply_mode}）")
+    print(f"  保持原始 scale: X={ref_scale_x:.3f}, Y={ref_scale_y:.3f}, Z={ref_scale_z:.3f}")
 
 # ===== 步骤4: 对齐计算和智能缩放（基于更新后的JSON数据） =====
 print(f"\n[Blender] [步骤4] 开始计算对齐旋转（基于更新后的JSON）...")
@@ -690,8 +740,8 @@ ref_dims = ref_box.dimensions.copy()
 ref_sizes = [ref_dims.x, ref_dims.y, ref_dims.z]
 
 print(f"[Blender] 参考 Box 创建完成:")
-print(f"  - Scale: ({ref_scale_x}, {ref_scale_y}, {ref_scale_z})")
-print(f"  - Rotation: ({ref_rot_x}°, {ref_rot_y}°, {ref_rot_z}°)")
+print(f"  - Scale(更新后): ({updated_ref_scale_x:.3f}, {updated_ref_scale_y:.3f}, {updated_ref_scale_z:.3f})")
+print(f"  - Rotation(更新后): ({updated_ref_rot_x:.1f}°, {updated_ref_rot_y:.1f}°, {updated_ref_rot_z:.1f}°)")
 print(f"  - 实际 Dimensions: ({ref_sizes[0]:.2f}, {ref_sizes[1]:.2f}, {ref_sizes[2]:.2f})")
 
 # 获取参考 Box 的旋转矩阵（在删除之前）
@@ -785,13 +835,21 @@ alignment_info = {
     "is_already_aligned": is_already_aligned,
     "transform_applied": {
         "additional_rotation": [additional_rot_x, additional_rot_y, additional_rot_z],
-        "additional_scale": [additional_scale_x, additional_scale_y, additional_scale_z]
+        "additional_scale": [additional_scale_x, additional_scale_y, additional_scale_z],
+        "rotation_apply_mode": rotation_apply_mode,
+        "scale_apply_mode": scale_apply_mode,
+        "rotation_applied_to_model": should_apply_rotation_to_model,
+        "rotation_applied_to_json": should_apply_rotation_to_json,
+        "scale_applied_to_model": should_apply_scale_to_model,
+        "scale_applied_to_json": should_apply_scale_to_json
     }
 }
 
-# 只有在需要旋转时才添加置换矩阵信息
+# 只有在需要旋转时才添加置换矩阵信息；同时在已对齐时清晰记录"保持更新后的JSON旋转"
 if not is_already_aligned:
     alignment_info["permutation_matrix"] = [[perm_matrix[i][j] for j in range(3)] for i in range(3)]
+else:
+    alignment_info["note"] = "model parallel to ref box; keep updated JSON rotation"
 
 # ===== 对齐计算结束 =====
 
@@ -863,9 +921,11 @@ scale_info = {
     "texture_count": texture_count,
     "materials_preserved": (texture_count > 0 or material_count > 0),
     "additional_rotation_applied": [additional_rot_x, additional_rot_y, additional_rot_z],
-    "rotation_applied_to_vertices": (abs(additional_rot_x) > 0.01 or abs(additional_rot_y) > 0.01 or abs(additional_rot_z) > 0.01),
+    "rotation_applied_to_vertices": should_apply_rotation_to_model and (abs(additional_rot_x) > 0.01 or abs(additional_rot_y) > 0.01 or abs(additional_rot_z) > 0.01),
     "additional_scale_applied": [additional_scale_x, additional_scale_y, additional_scale_z],
-    "additional_scale_applied_to_vertices": (abs(additional_scale_x - 1.0) > 0.001 or abs(additional_scale_y - 1.0) > 0.001 or abs(additional_scale_z - 1.0) > 0.001)
+    "additional_scale_applied_to_vertices": should_apply_scale_to_model and (abs(additional_scale_x - 1.0) > 0.001 or abs(additional_scale_y - 1.0) > 0.001 or abs(additional_scale_z - 1.0) > 0.001),
+    "rotation_apply_mode": rotation_apply_mode,
+    "scale_apply_mode": scale_apply_mode
 }
 
 # 保存临时结果
@@ -940,7 +1000,7 @@ print(f"[Blender] 处理完成！")
             },
             "optional": {
                 "max_workers": ("INT", {"default": 4, "min": 1, "max": 32, "tooltip": "最大并行处理线程数。每个模型有独立输出目录，理论上支持高并发。建议根据CPU核心数和内存大小调整"}),
-                "transform_params": ("TRANSFORM_PARAMS", {"tooltip": "变换参数\n从 ModelTransformParameters 节点连接\n包含旋转偏移和缩放乘数\n应用在智能缩放之后"}),
+                "transform_params": ("TRANSFORM_PARAMS", {"tooltip": "变换参数\n从 ModelTransformParameters 节点连接\n包含旋转偏移、缩放乘数与应用模式\n最先对模型应用（步骤1a/1b），并根据应用模式叠加到JSON（步骤3）"}),
             }
         }
 
@@ -958,7 +1018,8 @@ print(f"[Blender] 处理完成！")
                               sx: float, sy: float, sz: float,
                               blender_path: str, output_path: str,
                               additional_rot_x: float = 0.0, additional_rot_y: float = 0.0, additional_rot_z: float = 0.0,
-                              additional_scale_x: float = 1.0, additional_scale_y: float = 1.0, additional_scale_z: float = 1.0):
+                              additional_scale_x: float = 1.0, additional_scale_y: float = 1.0, additional_scale_z: float = 1.0,
+                              rotation_apply_mode: str = "both", scale_apply_mode: str = "both"):
         """使用带对齐功能的Blender脚本处理模型"""
         
         with tempfile.TemporaryDirectory() as td:
@@ -979,6 +1040,7 @@ print(f"[Blender] 处理完成！")
                 str(ref_rot_x), str(ref_rot_y), str(ref_rot_z),
                 str(additional_rot_x), str(additional_rot_y), str(additional_rot_z),
                 str(additional_scale_x), str(additional_scale_y), str(additional_scale_z),
+                rotation_apply_mode, scale_apply_mode,
                 bbox_path, scale_info_path, alignment_path
             ]
             
@@ -1030,10 +1092,27 @@ print(f"[Blender] 处理完成！")
                 
         return ext
     
+    def _round_and_clean_rotation(self, degrees_list, decimals: int = 3):
+        """将旋转角度列表四舍五入到指定小数位，并将-0.0规范为0.0"""
+        if not isinstance(degrees_list, (list, tuple)):
+            return degrees_list
+        cleaned = []
+        eps = 0.5 * (10 ** (-decimals))
+        for value in degrees_list:
+            try:
+                r = round(float(value), decimals)
+                if abs(r) < eps:
+                    r = 0.0
+                cleaned.append(r)
+            except Exception:
+                cleaned.append(value)
+        return cleaned
+    
     def _process_single_object(self, obj_data: dict, index: int, force_exact_alignment: bool, 
                               blender_path: str, rotation_x_offset: float = 0.0, rotation_y_offset: float = 0.0, 
                               rotation_z_offset: float = 0.0, scale_x_multiplier: float = 1.0, 
-                              scale_y_multiplier: float = 1.0, scale_z_multiplier: float = 1.0) -> dict:
+                              scale_y_multiplier: float = 1.0, scale_z_multiplier: float = 1.0,
+                              rotation_apply_mode: str = "both", scale_apply_mode: str = "both") -> dict:
         """处理单个对象"""
         result = {
             "index": index,
@@ -1140,7 +1219,8 @@ print(f"[Blender] 处理完成！")
                     blender_path,
                     output_path,
                     rotation_x_offset, rotation_y_offset, rotation_z_offset,  # 额外旋转偏移
-                    scale_x_multiplier, scale_y_multiplier, scale_z_multiplier  # 额外缩放乘数
+                    scale_x_multiplier, scale_y_multiplier, scale_z_multiplier,  # 额外缩放乘数
+                    rotation_apply_mode, scale_apply_mode  # 应用模式
                 )
                 
                 if not bbox_data or not scale_info_data or not alignment_data:
@@ -1169,7 +1249,8 @@ print(f"[Blender] 处理完成！")
                 result["bbox"] = bbox_data
                 result["scale_info"] = scale_info_data
                 result["alignment_info"] = alignment_data
-                result["rotation"] = alignment_data["rotation_degrees"]
+                # 规范化旋转角度，避免微小浮点误差与-0.0
+                result["rotation"] = self._round_and_clean_rotation(alignment_data.get("rotation_degrees", []), decimals=3)
                 
                 # 打印输出路径信息
                 print(f"[Batch] 对象 [{index}] 处理成功")
@@ -1225,6 +1306,25 @@ print(f"[Blender] 处理完成！")
                 scale_x_multiplier = 1.0
                 scale_y_multiplier = 1.0
                 scale_z_multiplier = 1.0
+            
+            # 解析应用模式参数
+            rotation_apply_mode_str = transform_params.get('rotation_apply_mode', '应用在模型本身+叠加在JSON上')
+            scale_apply_mode_str = transform_params.get('scale_apply_mode', '应用在模型本身+叠加在JSON上')
+            
+            # 转换为英文标识符
+            if rotation_apply_mode_str == '仅应用在模型本身':
+                rotation_apply_mode = 'model_only'
+            elif rotation_apply_mode_str == '仅叠加在JSON上':
+                rotation_apply_mode = 'json_only'
+            else:  # '应用在模型本身+叠加在JSON上'
+                rotation_apply_mode = 'both'
+            
+            if scale_apply_mode_str == '仅应用在模型本身':
+                scale_apply_mode = 'model_only'
+            elif scale_apply_mode_str == '仅叠加在JSON上':
+                scale_apply_mode = 'json_only'
+            else:  # '应用在模型本身+叠加在JSON上'
+                scale_apply_mode = 'both'
         else:
             # 默认值
             rotation_x_offset = 0.0
@@ -1233,13 +1333,17 @@ print(f"[Blender] 处理完成！")
             scale_x_multiplier = 1.0
             scale_y_multiplier = 1.0
             scale_z_multiplier = 1.0
+            rotation_apply_mode = 'both'
+            scale_apply_mode = 'both'
         
         print(f"\n=== VVL智能模型批量缩放器 开始处理 ===")
         print(f"[Batch] 最大并行线程数: {max_workers}")
         if rotation_x_offset != 0.0 or rotation_y_offset != 0.0 or rotation_z_offset != 0.0:
             print(f"[Batch] 额外旋转偏移: X={rotation_x_offset}°, Y={rotation_y_offset}°, Z={rotation_z_offset}°")
+            print(f"[Batch] 旋转应用模式: {rotation_apply_mode}")
         if scale_x_multiplier != 1.0 or scale_y_multiplier != 1.0 or scale_z_multiplier != 1.0:
             print(f"[Batch] 额外缩放乘数: X={scale_x_multiplier}, Y={scale_y_multiplier}, Z={scale_z_multiplier}")
+            print(f"[Batch] 缩放应用模式: {scale_apply_mode}")
         
         try:
             # 解析JSON输入
@@ -1285,7 +1389,9 @@ print(f"[Blender] 处理完成！")
                         rotation_z_offset,
                         scale_x_multiplier,
                         scale_y_multiplier,
-                        scale_z_multiplier
+                        scale_z_multiplier,
+                        rotation_apply_mode,
+                        scale_apply_mode
                     )
                     future_to_index[future] = index
                 
@@ -1321,16 +1427,31 @@ print(f"[Blender] 处理完成！")
                         output_data['objects'][index]['3d_url'] = result['output_path']
                         
                         # 更新rotation字段
-                        if result.get('alignment_info') and result.get('rotation'):
-                            is_aligned = result['alignment_info'].get('is_already_aligned', False)
-                            if is_aligned:
-                                # 如果已经对齐，完全保留原始rotation字段（不做任何修改）
-                                original_rotation = output_data['objects'][index].get('rotation', 'undefined')
-                                print(f"[Batch] 对象 [{index}] 已对齐，保留原始rotation: {original_rotation}")
+                        if result.get('alignment_info'):
+                            alignment_info = result['alignment_info']
+                            apply_mode = alignment_info.get('transform_applied', {}).get('rotation_apply_mode', 'both')
+                            updated_rotation = alignment_info.get('ref_box', {}).get('updated_rotation')
+                            is_aligned = alignment_info.get('is_already_aligned', False)
+                            
+                            # 判断是否有额外的旋转偏移（非零）
+                            additional_rotation = alignment_info.get('transform_applied', {}).get('additional_rotation', [0, 0, 0])
+                            has_additional_rotation = any(abs(r) > 0.01 for r in additional_rotation)
+                            
+                            # 只有当有额外旋转且应用模式包含JSON时，才写回updated_rotation
+                            if apply_mode in ('json_only', 'both') and updated_rotation is not None and has_additional_rotation:
+                                # 当应用模式包含JSON更新且有额外旋转时，写回更新后的JSON rotation
+                                cleaned = self._round_and_clean_rotation(updated_rotation, decimals=3)
+                                output_data['objects'][index]['rotation'] = cleaned
+                                print(f"[Batch] 对象 [{index}] 写回JSON更新后的rotation: {cleaned} (mode={apply_mode})")
                             else:
-                                # 需要旋转对齐，使用计算得到的rotation
-                                output_data['objects'][index]['rotation'] = result['rotation']
-                                print(f"[Batch] 对象 [{index}] 更新rotation: {result['rotation']}")
+                                # 保持原逻辑：已对齐保留原始rotation；否则写入计算得到的rotation
+                                if result.get('rotation'):
+                                    if is_aligned:
+                                        original_rotation = output_data['objects'][index].get('rotation', 'undefined')
+                                        print(f"[Batch] 对象 [{index}] 已对齐，保留原始rotation: {original_rotation}")
+                                    else:
+                                        output_data['objects'][index]['rotation'] = result['rotation']
+                                        print(f"[Batch] 对象 [{index}] 更新rotation: {result['rotation']}")
                         
                         # 可选：添加处理信息到对象（如果需要的话）
                         # output_data['objects'][index]['_processing_info'] = {
