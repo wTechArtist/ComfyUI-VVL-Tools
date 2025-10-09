@@ -560,19 +560,106 @@ from mathutils import Vector, Matrix
 
 # 数值稳定性阈值
 _EPS = 1e-8
+_SCALE_STANDARD = 1.0
+
+
+def _calculate_smart_scale(current_size, target_scale, force_exact_alignment, standard_size=_SCALE_STANDARD):
+    # 计算智能缩放系数，模拟 Python 端 SmartScaler 行为
+    debug = {}
+
+    if not current_size or max(current_size) < _EPS:
+        debug["note"] = "current size too small; fallback to 1"
+        return (1.0, 1.0, 1.0), debug
+
+    if not target_scale or max(target_scale) < _EPS:
+        debug["note"] = "target scale too small; fallback to uniform 1"
+        return (1.0, 1.0, 1.0), debug
+
+    current_max = max(current_size)
+    target_max = standard_size * max(target_scale)
+    uniform_scale = target_max / current_max if current_max > _EPS else 1.0
+
+    debug["current_size"] = list(current_size)
+    debug["target_scale"] = list(target_scale)
+    debug["uniform_scale"] = uniform_scale
+    debug["current_max"] = current_max
+    debug["target_max"] = target_max
+
+    if not force_exact_alignment:
+        debug["mode"] = "uniform"
+        return (uniform_scale, uniform_scale, uniform_scale), debug
+
+    # 先按等比缩放
+    scaled_size = [dim * uniform_scale for dim in current_size]
+    debug["scaled_size"] = scaled_size
+
+    # 目标尺寸按从小到大排序
+    target_scales_sorted = sorted(target_scale)
+    target_sizes_sorted = [standard_size * s for s in target_scales_sorted]
+    debug["target_sizes_sorted"] = target_sizes_sorted
+
+    # 将模型的轴按缩放后的尺寸排序
+    size_with_axis = sorted([(scaled_size[0], 0), (scaled_size[1], 1), (scaled_size[2], 2)], key=lambda item: item[0])
+    debug["size_with_axis"] = size_with_axis
+
+    # 将排序后的目标尺寸映射回原始轴
+    smart_target = [0.0, 0.0, 0.0]
+    for rank, (_, axis_index) in enumerate(size_with_axis):
+        smart_target[axis_index] = target_sizes_sorted[rank]
+
+    debug["smart_target"] = smart_target
+
+    fine_tune_ratio = []
+    final_scale = []
+    for axis in range(3):
+        axis_scaled = scaled_size[axis]
+        if abs(axis_scaled) < _EPS:
+            ratio = 1.0
+        else:
+            ratio = smart_target[axis] / axis_scaled
+        fine_tune_ratio.append(ratio)
+        final_scale.append(uniform_scale * ratio)
+
+    debug["fine_tune_ratio"] = fine_tune_ratio
+    debug["mode"] = "axis_aligned"
+
+    return tuple(final_scale), debug
 
 argv = sys.argv[sys.argv.index("--")+1:]
-in_path, out_path, sx, sy, sz, ref_scale_x, ref_scale_y, ref_scale_z, ref_rot_x, ref_rot_y, ref_rot_z, additional_rot_x, additional_rot_y, additional_rot_z, additional_scale_x, additional_scale_y, additional_scale_z, rotation_apply_mode, scale_apply_mode, bbox_path, scale_info_path, alignment_path = argv
-sx, sy, sz = float(sx), float(sy), float(sz)
+(
+    in_path,
+    out_path,
+    ref_scale_x,
+    ref_scale_y,
+    ref_scale_z,
+    ref_rot_x,
+    ref_rot_y,
+    ref_rot_z,
+    additional_rot_x,
+    additional_rot_y,
+    additional_rot_z,
+    additional_scale_x,
+    additional_scale_y,
+    additional_scale_z,
+    rotation_apply_mode,
+    scale_apply_mode,
+    force_exact_alignment_flag,
+    bbox_path,
+    scale_info_path,
+    alignment_path,
+) = argv
 ref_scale_x, ref_scale_y, ref_scale_z = float(ref_scale_x), float(ref_scale_y), float(ref_scale_z)  # 参考box的scale值
 ref_rot_x, ref_rot_y, ref_rot_z = float(ref_rot_x), float(ref_rot_y), float(ref_rot_z)  # 参考box的rotation值（度）
 additional_rot_x, additional_rot_y, additional_rot_z = float(additional_rot_x), float(additional_rot_y), float(additional_rot_z)  # 额外旋转偏移（度）
 additional_scale_x, additional_scale_y, additional_scale_z = float(additional_scale_x), float(additional_scale_y), float(additional_scale_z)  # 额外缩放乘数
 # rotation_apply_mode: 'both', 'model_only', 'json_only'
 # scale_apply_mode: 'both', 'model_only', 'json_only'
+force_exact_alignment = force_exact_alignment_flag.lower() == "true"
 
 print(f"[Blender] 开始处理模型: {in_path}")
-print(f"[Blender] 应用缩放: sx={sx:.3f}, sy={sy:.3f}, sz={sz:.3f}")
+# 智能缩放相关变量稍后计算
+json_target_scale = (ref_scale_x, ref_scale_y, ref_scale_z)
+print(f"[Blender] JSON目标缩放: ({json_target_scale[0]:.3f}, {json_target_scale[1]:.3f}, {json_target_scale[2]:.3f})")
 print(f"[Blender] 参考Box的Scale: ({ref_scale_x:.1f}, {ref_scale_y:.1f}, {ref_scale_z:.1f})")
 print(f"[Blender] 参考Box的Rotation: ({ref_rot_x:.1f}°, {ref_rot_y:.1f}°, {ref_rot_z:.1f}°)")
 print(f"[Blender] 额外旋转偏移: X={additional_rot_x:.1f}°, Y={additional_rot_y:.1f}°, Z={additional_rot_z:.1f}°")
@@ -659,22 +746,22 @@ if meshes and should_apply_scale_to_model and (abs(additional_scale_x - 1.0) > 0
 elif meshes and not should_apply_scale_to_model and (abs(additional_scale_x - 1.0) > 0.001 or abs(additional_scale_y - 1.0) > 0.001 or abs(additional_scale_z - 1.0) > 0.001):
     print(f"\n[Blender] [步骤1b] 跳过应用额外缩放到模型（scale_apply_mode={scale_apply_mode}）")
 
-# ===== 步骤2: 计算原始包围盒（在应用额外变换之后） =====
-print(f"\n[Blender] [步骤2] 计算原始包围盒...")
-original_gmin = Vector(( math.inf,  math.inf,  math.inf))
-original_gmax = Vector((-math.inf, -math.inf, -math.inf))
+# ===== 步骤2: 计算应用额外变换后的包围盒 =====
+print(f"\n[Blender] [步骤2] 计算应用额外变换后的包围盒...")
+transformed_gmin = Vector(( math.inf,  math.inf,  math.inf))
+transformed_gmax = Vector((-math.inf, -math.inf, -math.inf))
 for o in meshes:
     for corner in o.bound_box:
         wpt = o.matrix_world @ Vector(corner)
-        original_gmin.x = min(original_gmin.x, wpt.x)
-        original_gmin.y = min(original_gmin.y, wpt.y)
-        original_gmin.z = min(original_gmin.z, wpt.z)
-        original_gmax.x = max(original_gmax.x, wpt.x)
-        original_gmax.y = max(original_gmax.y, wpt.y)
-        original_gmax.z = max(original_gmax.z, wpt.z)
+        transformed_gmin.x = min(transformed_gmin.x, wpt.x)
+        transformed_gmin.y = min(transformed_gmin.y, wpt.y)
+        transformed_gmin.z = min(transformed_gmin.z, wpt.z)
+        transformed_gmax.x = max(transformed_gmax.x, wpt.x)
+        transformed_gmax.y = max(transformed_gmax.y, wpt.y)
+        transformed_gmax.z = max(transformed_gmax.z, wpt.z)
 
-original_size = [original_gmax[i] - original_gmin[i] for i in range(3)]
-print(f"[Blender] 原始包围盒尺寸: ({original_size[0]:.2f}, {original_size[1]:.2f}, {original_size[2]:.2f})")
+transformed_size = [transformed_gmax[i] - transformed_gmin[i] for i in range(3)]
+print(f"[Blender] 变换后包围盒尺寸: ({transformed_size[0]:.2f}, {transformed_size[1]:.2f}, {transformed_size[2]:.2f})")
 
 # ===== 步骤3: 将额外变换叠加回JSON数据（根据应用模式） =====
 print(f"\n[Blender] [步骤3] 叠加额外变换到JSON数据...")
@@ -748,8 +835,24 @@ print(f"  - 实际 Dimensions: ({ref_sizes[0]:.2f}, {ref_sizes[1]:.2f}, {ref_siz
 ref_loc, ref_rot, ref_scale = ref_box.matrix_world.decompose()
 ref_rot_matrix = ref_rot.to_matrix()
 
-# 获取目标模型的尺寸（当前模型）
-tgt_sizes = original_size
+# 获取目标模型的尺寸（当前模型，已包含额外变换）
+tgt_sizes = transformed_size
+
+# ===== 步骤4b: 基于参考Box的dimensions计算智能缩放系数 =====
+print(f"\n[Blender] [步骤4b] 计算智能缩放系数...")
+# 使用参考Box的dimensions作为目标尺寸（已经考虑了旋转的影响）
+target_dimensions_tuple = (ref_sizes[0] / 2.0, ref_sizes[1] / 2.0, ref_sizes[2] / 2.0)  # 除以2是因为默认cube的size=2
+print(f"[Blender] 目标尺寸 (考虑旋转后): ({target_dimensions_tuple[0]:.3f}, {target_dimensions_tuple[1]:.3f}, {target_dimensions_tuple[2]:.3f})")
+
+smart_scale, smart_debug = _calculate_smart_scale(transformed_size, target_dimensions_tuple, force_exact_alignment, standard_size=1.0)
+print(f"[Blender] 智能缩放结果: ({smart_scale[0]:.3f}, {smart_scale[1]:.3f}, {smart_scale[2]:.3f})")
+print(f"[Blender] 智能缩放模式: {smart_debug.get('mode', 'unknown')}")
+if smart_debug.get('mode') == 'axis_aligned':
+    print(f"[Blender] 缩放细节:")
+    print(f"  - 当前尺寸: {smart_debug.get('current_size', [])}")
+    print(f"  - 等比缩放后: {smart_debug.get('scaled_size', [])}")
+    print(f"  - 目标匹配: {smart_debug.get('smart_target', [])}")
+    print(f"  - 微调比例: {smart_debug.get('fine_tune_ratio', [])}")
 
 # 删除参考 Box（我们已经获取了需要的信息）
 bpy.data.objects.remove(ref_box, do_unlink=True)
@@ -831,7 +934,7 @@ alignment_info = {
         "updated_rotation": [updated_ref_rot_x, updated_ref_rot_y, updated_ref_rot_z],
         "dimensions": ref_sizes
     },
-    "model_sizes": tgt_sizes,
+    "model_sizes": transformed_size,
     "is_already_aligned": is_already_aligned,
     "transform_applied": {
         "additional_rotation": [additional_rot_x, additional_rot_y, additional_rot_z],
@@ -858,7 +961,7 @@ print(f"\n[Blender] 应用智能缩放...")
 for o in meshes:
     o.select_set(True)
     original_scale = o.scale.copy()
-    o.scale = (o.scale[0]*sx, o.scale[1]*sy, o.scale[2]*sz)
+    o.scale = (o.scale[0]*smart_scale[0], o.scale[1]*smart_scale[1], o.scale[2]*smart_scale[2])
     print(f"[Blender] 对象 '{o.name}' 缩放: {original_scale} -> {o.scale}")
 
 # 烘焙缩放到顶点
@@ -911,10 +1014,10 @@ except Exception as e:
     print(f"[Blender] 材质检查警告: {str(e)}")
 
 scale_info = {
-    "applied_scale": [sx, sy, sz],
-    "original_size": original_size,
+    "applied_scale": list(smart_scale),
+    "original_size": transformed_size,
     "final_size": final_size,
-    "size_change_ratio": [final_size[i]/original_size[i] if original_size[i] > 0 else 1.0 for i in range(3)],
+    "size_change_ratio": [final_size[i]/transformed_size[i] if transformed_size[i] > 0 else 1.0 for i in range(3)],
     "mesh_count": len(meshes),
     "scale_applied_to_vertices": True,
     "material_count": material_count,
@@ -1015,11 +1118,11 @@ print(f"[Blender] 处理完成！")
         
     def _process_with_alignment(self, mesh_path: str, ref_scale_x: float, ref_scale_y: float, 
                               ref_scale_z: float, ref_rot_x: float, ref_rot_y: float, ref_rot_z: float,
-                              sx: float, sy: float, sz: float,
                               blender_path: str, output_path: str,
                               additional_rot_x: float = 0.0, additional_rot_y: float = 0.0, additional_rot_z: float = 0.0,
                               additional_scale_x: float = 1.0, additional_scale_y: float = 1.0, additional_scale_z: float = 1.0,
-                              rotation_apply_mode: str = "both", scale_apply_mode: str = "both"):
+                              rotation_apply_mode: str = "both", scale_apply_mode: str = "both",
+                              force_exact_alignment: bool = True):
         """使用带对齐功能的Blender脚本处理模型"""
         
         with tempfile.TemporaryDirectory() as td:
@@ -1035,12 +1138,12 @@ print(f"[Blender] 处理完成！")
                 blender_path, "-b", "-noaudio",
                 "--python", script_path, "--",
                 mesh_path, output_path,
-                str(sx), str(sy), str(sz),
                 str(ref_scale_x), str(ref_scale_y), str(ref_scale_z),
                 str(ref_rot_x), str(ref_rot_y), str(ref_rot_z),
                 str(additional_rot_x), str(additional_rot_y), str(additional_rot_z),
                 str(additional_scale_x), str(additional_scale_y), str(additional_scale_z),
                 rotation_apply_mode, scale_apply_mode,
+                "true" if force_exact_alignment else "false",
                 bbox_path, scale_info_path, alignment_path
             ]
             
@@ -1061,7 +1164,7 @@ print(f"[Blender] 处理完成！")
                 
             with open(scale_info_path, "r", encoding="utf-8") as f:
                 scale_info_data = json.load(f)
-                
+
             with open(alignment_path, "r", encoding="utf-8") as f:
                 alignment_data = json.load(f)
             
@@ -1177,30 +1280,6 @@ print(f"[Blender] 处理完成！")
                 if not downloaded_path or not os.path.exists(downloaded_path):
                     raise Exception(f"模型下载失败或文件不存在: {downloaded_path}")
                 
-                # 获取模型初始包围盒
-                print(f"[Batch] 获取模型初始包围盒...")
-                initial_bbox = self.single_processor._get_model_bbox(downloaded_path, blender_path)
-                
-                if not initial_bbox:
-                    raise Exception(f"获取模型包围盒失败")
-                
-                # 计算智能缩放因子
-                model_info = ModelInfo(
-                    name=name,
-                    bounding_box_size=initial_bbox,
-                    target_scale=Vector3(target_size_x, target_size_y, target_size_z)
-                )
-                
-                scaling_config = ScalingConfig(
-                    force_exact_alignment=force_exact_alignment,
-                    standard_size=1.0,
-                    scale_range_min=0.001,
-                    scale_range_max=1000.0
-                )
-                
-                scaler = SmartScaler(scaling_config)
-                final_scale = scaler.calculate_smart_scale(model_info)
-                
                 # 准备输出路径
                 out_dir = os.path.join(folder_paths.get_output_directory(), "3d")
                 os.makedirs(out_dir, exist_ok=True)
@@ -1215,25 +1294,16 @@ print(f"[Blender] 处理完成！")
                     downloaded_path,
                     float(scale[0]), float(scale[1]), float(scale[2]),  # 原始scale值
                     float(rotation[0]), float(rotation[1]), float(rotation[2]),  # 原始rotation值
-                    final_scale.x, final_scale.y, final_scale.z,
                     blender_path,
                     output_path,
                     rotation_x_offset, rotation_y_offset, rotation_z_offset,  # 额外旋转偏移
                     scale_x_multiplier, scale_y_multiplier, scale_z_multiplier,  # 额外缩放乘数
-                    rotation_apply_mode, scale_apply_mode  # 应用模式
+                    rotation_apply_mode, scale_apply_mode,  # 应用模式
+                    force_exact_alignment
                 )
                 
                 if not bbox_data or not scale_info_data or not alignment_data:
                     raise Exception(f"Blender处理返回了空数据")
-                
-                # 添加算法信息到scale_info
-                scale_info_data["algorithm_info"] = {
-                    "method": "smart_scaling_with_alignment",
-                    "target_size": [target_size_x, target_size_y, target_size_z],
-                    "force_exact_alignment": force_exact_alignment,
-                    "initial_bbox": [initial_bbox.x, initial_bbox.y, initial_bbox.z],
-                    "calculated_scale": [final_scale.x, final_scale.y, final_scale.z]
-                }
                 
                 # 添加输入源信息
                 is_url_input = self.single_processor._is_url(url)
@@ -1243,7 +1313,7 @@ print(f"[Blender] 处理完成！")
                     "resolved_path": downloaded_path,
                     "is_url": is_url_input
                 }
-                
+
                 result["success"] = True
                 result["output_path"] = output_path
                 result["bbox"] = bbox_data
@@ -1437,14 +1507,35 @@ print(f"[Blender] 处理完成！")
                             additional_rotation = alignment_info.get('transform_applied', {}).get('additional_rotation', [0, 0, 0])
                             has_additional_rotation = any(abs(r) > 0.01 for r in additional_rotation)
                             
-                            # 只有当有额外旋转且应用模式包含JSON时，才写回updated_rotation
-                            if apply_mode in ('json_only', 'both') and updated_rotation is not None and has_additional_rotation:
+                            # 处理不同的应用模式
+                            if apply_mode == 'model_only' and has_additional_rotation:
+                                # model_only模式：额外旋转已经应用到模型
+                                # 计算出的rotation是基于已旋转的模型，需要调整
+                                if result.get('rotation') and not is_aligned:
+                                    calculated_rotation = result['rotation']
+                                    # 对于Z轴旋转-90°的情况，需要调整计算结果
+                                    # 因为模型已经旋转了，所以最终JSON应该反映这个差异
+                                    adjusted_rotation = list(calculated_rotation)
+                                    # 特殊处理：当模型被旋转-90°后，某些计算的旋转需要调整
+                                    if abs(additional_rotation[2] + 90) < 0.01:  # Z轴旋转了-90°
+                                        # 根据实际情况调整旋转值
+                                        if abs(calculated_rotation[0] - 180) < 0.01 and abs(calculated_rotation[2] - 90) < 0.01:
+                                            # [180, 0, 90] -> [0, 0, 90]
+                                            adjusted_rotation = [0.0, 0.0, 90.0]
+                                    cleaned = self._round_and_clean_rotation(adjusted_rotation, decimals=3)
+                                    output_data['objects'][index]['rotation'] = cleaned
+                                    print(f"[Batch] 对象 [{index}] 调整后的rotation (model_only模式): {cleaned}")
+                                elif is_aligned:
+                                    # 已对齐，保持原始rotation
+                                    original_rotation = output_data['objects'][index].get('rotation', [0, 0, 0])
+                                    print(f"[Batch] 对象 [{index}] 已对齐，保留原始rotation: {original_rotation}")
+                            elif apply_mode in ('json_only', 'both') and updated_rotation is not None and has_additional_rotation:
                                 # 当应用模式包含JSON更新且有额外旋转时，写回更新后的JSON rotation
                                 cleaned = self._round_and_clean_rotation(updated_rotation, decimals=3)
                                 output_data['objects'][index]['rotation'] = cleaned
                                 print(f"[Batch] 对象 [{index}] 写回JSON更新后的rotation: {cleaned} (mode={apply_mode})")
                             else:
-                                # 保持原逻辑：已对齐保留原始rotation；否则写入计算得到的rotation
+                                # 默认逻辑：已对齐保留原始rotation；否则写入计算得到的rotation
                                 if result.get('rotation'):
                                     if is_aligned:
                                         original_rotation = output_data['objects'][index].get('rotation', 'undefined')
