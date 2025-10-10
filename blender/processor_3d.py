@@ -368,7 +368,10 @@ with open(bbox_path, "w", encoding="utf-8") as f:
 class ModelTransformParameters:
     """
     模型变换参数节点
-    
+
+    仅json = Rodin-cn
+    仅模型 = Rodin-nocn / tripo
+
     只负责设置和传递变换参数，不进行实际的模型处理：
     • 输出旋转偏移量（度）
     • 输出缩放乘数
@@ -562,6 +565,9 @@ from mathutils import Vector, Matrix
 _EPS = 1e-8
 _SCALE_STANDARD = 1.0
 
+# 维度相似性阈值（20%的相对误差容忍度）
+_DIM_TOLERANCE = 0.2
+
 
 def _calculate_smart_scale(current_size, target_scale, force_exact_alignment, standard_size=_SCALE_STANDARD):
     # 计算智能缩放系数，模拟 Python 端 SmartScaler 行为
@@ -599,7 +605,7 @@ def _calculate_smart_scale(current_size, target_scale, force_exact_alignment, st
     debug["target_sizes_sorted"] = target_sizes_sorted
 
     # 将模型的轴按缩放后的尺寸排序
-    size_with_axis = sorted([(scaled_size[0], 0), (scaled_size[1], 1), (scaled_size[2], 2)], key=lambda item: item[0])
+    size_with_axis = sorted([(scaled_size[0], 0), (scaled_size[1], 1), (scaled_size[2], 2)], key=lambda item: (item[0], item[1]))
     debug["size_with_axis"] = size_with_axis
 
     # 将排序后的目标尺寸映射回原始轴
@@ -857,9 +863,10 @@ if smart_debug.get('mode') == 'axis_aligned':
 # 删除参考 Box（我们已经获取了需要的信息）
 bpy.data.objects.remove(ref_box, do_unlink=True)
 
-# 对尺寸进行排序，得到从小到大的轴索引
-ref_sorted_indices = sorted(range(3), key=lambda i: ref_sizes[i])  # [最小轴, 中轴, 最大轴]
-tgt_sorted_indices = sorted(range(3), key=lambda i: tgt_sizes[i])
+# 对尺寸进行稳定排序（Python的sorted本身就是稳定的）
+# 对于相同或相近的值，会保持原始索引顺序
+ref_sorted_indices = sorted(range(3), key=lambda i: (ref_sizes[i], i))
+tgt_sorted_indices = sorted(range(3), key=lambda i: (tgt_sizes[i], i))
 
 # 创建轴映射：目标的第i个轴应该映射到参考的第j个轴
 axis_mapping = [None, None, None]
@@ -876,8 +883,51 @@ print(f"  轴映射: X→{'XYZ'[axis_mapping[0]]}, Y→{'XYZ'[axis_mapping[1]]},
 
 # 检查是否已经对齐（恒等映射）
 is_already_aligned = (axis_mapping[0] == 0 and axis_mapping[1] == 1 and axis_mapping[2] == 2)
+
+# 额外检查：对于非恒等映射，检查是否是因为维度相近导致的
+if not is_already_aligned:
+    # 检查每对被交换的轴，它们的维度是否相近
+    swapped_axes = []
+    for i in range(3):
+        if axis_mapping[i] != i:
+            swapped_axes.append(i)
+    
+    if swapped_axes:
+        # 检查被交换的轴在模型和box中的维度是否都相近
+        all_swaps_negligible = True
+        for i in swapped_axes:
+            j = axis_mapping[i]  # i被映射到j
+            
+            # 检查模型的i和j轴是否维度相近
+            model_i = tgt_sizes[i]
+            model_j = tgt_sizes[j]
+            if model_i > _EPS:
+                model_diff = abs(model_i - model_j) / max(model_i, model_j)
+            else:
+                model_diff = 0
+            
+            # 检查box的i和j轴是否维度相近  
+            box_i = ref_sizes[i]
+            box_j = ref_sizes[j]
+            if box_i > _EPS:
+                box_diff = abs(box_i - box_j) / max(box_i, box_j)
+            else:
+                box_diff = 0
+            
+            # 如果模型或box的这两个轴维度差异显著，说明确实需要旋转
+            if model_diff > _DIM_TOLERANCE or box_diff > _DIM_TOLERANCE:
+                all_swaps_negligible = False
+                break
+        
+        if all_swaps_negligible:
+            print(f"  [对齐检查] 检测到轴交换但维度相近（容忍度{_DIM_TOLERANCE*100:.0f}%），判定为已对齐")
+            axis_mapping = [0, 1, 2]
+            is_already_aligned = True
+
 if is_already_aligned:
     print(f"  [对齐检查] 模型已经与参考box平行对齐，无需旋转！")
+else:
+    print(f"  [对齐检查] 模型需要旋转以对齐参考box")
 
 # 如果已经对齐，直接设置为无旋转
 if is_already_aligned:
