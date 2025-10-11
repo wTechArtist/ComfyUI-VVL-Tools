@@ -38,11 +38,13 @@ class FlexibleOptionalInputType(dict):
     
     - 任何未显式声明的 key，在被访问时都返回 (type,) 作为其类型定义
     - __contains__ 始终返回 True，从而允许前端动态增加可选输入端口
+    - 支持传递额外的属性（如 rawLink、lazy 等）
     """
 
-    def __init__(self, type_def, data=None):
+    def __init__(self, type_def, data=None, extra_kwargs=None):
         self.type_def = type_def
         self.data = data or {}
+        self.extra_kwargs = extra_kwargs or {}
         # 将初始数据映射到自身，使其在 UI 上可见
         for k, v in self.data.items():
             self[k] = v
@@ -50,6 +52,9 @@ class FlexibleOptionalInputType(dict):
     def __getitem__(self, key):
         if key in self.data:
             return self.data[key]
+        # 对于动态生成的 initial_value 输入，应用额外的属性
+        if self.extra_kwargs:
+            return (self.type_def, self.extra_kwargs)
         return (self.type_def,)
 
     def __contains__(self, key):
@@ -145,6 +150,7 @@ class VVLForLoopEndAsync:
     2. 自动调整输出端口数量以匹配输入
     3. 支持并行展开和顺序执行
     4. 与ForLoopStart节点配合工作
+    5. 使用lazy输入机制避免并发模式下的重复执行
     """
     
     def __init__(self):
@@ -156,9 +162,13 @@ class VVLForLoopEndAsync:
             "required": {
                 "flow": ("FLOW_CONTROL", {"rawLink": True}),
             },
-            "optional": FlexibleOptionalInputType(any_type, {
-                "initial_value1": (any_type, {"rawLink": True}),
-            }),
+            "optional": FlexibleOptionalInputType(
+                any_type, 
+                {
+                    "initial_value1": (any_type, {"rawLink": True, "lazy": True}),
+                },
+                extra_kwargs={"rawLink": True, "lazy": True}
+            ),
             "hidden": {
                 "dynprompt": "DYNPROMPT",
                 "extra_pnginfo": "EXTRA_PNGINFO",
@@ -171,6 +181,40 @@ class VVLForLoopEndAsync:
     FUNCTION = "for_loop_end"
 
     CATEGORY = "VVL/Loop"
+    
+    def check_lazy_status(self, flow, dynprompt=None, unique_id=None, **kwargs):
+        """
+        检查lazy输入状态：在并发模式下不需要解析initial_value输入
+        在顺序模式下需要解析initial_value输入
+        """
+        # 获取 forLoopStart 节点信息
+        try:
+            while_open = flow[0]
+            forstart_node = dynprompt.get_node(while_open)
+            
+            if forstart_node['class_type'] == 'VVL forLoopStart':
+                inputs = forstart_node['inputs']
+                parallel_flag = inputs.get('parallel', False)
+                total = inputs.get('total', None)
+                
+                # 尝试解析 total 值
+                total_resolved = self._resolve_int_input(dynprompt, total)
+                
+                # 如果是并发模式且 total 可以在编译期确定，则不需要解析 initial_value 输入
+                if parallel_flag and isinstance(total_resolved, int) and total_resolved > 0:
+                    logger.debug(f"[VVL] check_lazy_status: 并发模式，不需要预先解析 initial_value 输入")
+                    # 返回空列表，表示不需要任何 lazy 输入
+                    return []
+        except Exception as e:
+            logger.debug(f"[VVL] check_lazy_status: 检查失败 {e}，默认需要所有输入")
+        
+        # 顺序模式：需要所有 initial_value 输入
+        logger.debug(f"[VVL] check_lazy_status: 顺序模式，需要所有 initial_value 输入")
+        required_inputs = []
+        for key in kwargs.keys():
+            if key.startswith("initial_value"):
+                required_inputs.append(key)
+        return required_inputs
 
     def _explore_dependencies(self, node_id, dynprompt, upstream, parent_ids):
         try:
