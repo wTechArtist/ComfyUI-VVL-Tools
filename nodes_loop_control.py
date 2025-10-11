@@ -460,7 +460,69 @@ class VVLForLoopEndAsync:
                     else:
                         logger.debug(f"[VVL] _resolve_int_input: Length 节点解析失败，length={length}")
 
-                # 2) 解析 VVL listChunk：当 total 连接到其 num_chunks 输出时可以静态计算
+                # 2) 解析 JsonObjectSplitter：当 total 连接到其 part1_count 或 part2_count 输出时可以静态计算
+                if "jsonobjectsplitter" in ct.lower():
+                    logger.debug(f"[VVL] _resolve_int_input: 检测到 JsonObjectSplitter 节点，尝试静态解析")
+                    try:
+                        inputs = node.get("inputs", {})
+                        json_text_in = inputs.get("json_text", None)
+                        ratio_str = inputs.get("ratio", "1:1")
+                        
+                        # 解析比例参数
+                        ratio_parts = [1, 1]  # 默认 1:1
+                        try:
+                            ratio_str = str(ratio_str).strip()
+                            if ':' in ratio_str:
+                                parts = ratio_str.split(':')
+                                if len(parts) == 2:
+                                    ratio_parts[0] = float(parts[0].strip())
+                                    ratio_parts[1] = float(parts[1].strip())
+                                    if ratio_parts[0] <= 0 or ratio_parts[1] <= 0:
+                                        ratio_parts = [1, 1]
+                        except Exception:
+                            ratio_parts = [1, 1]
+                        
+                        # 尝试解析输入的 JSON 文本
+                        json_text = self._resolve_constant_string(dynprompt, json_text_in)
+                        logger.debug(f"[VVL] _resolve_int_input: JsonObjectSplitter json_text 解析成功={isinstance(json_text, str)}, ratio={ratio_parts[0]}:{ratio_parts[1]}")
+                        
+                        if isinstance(json_text, str) and json_text:
+                            import json as _json
+                            try:
+                                data = _json.loads(json_text)
+                                objects = data.get("objects", [])
+                                if isinstance(objects, list):
+                                    total_count = len(objects)
+                                    
+                                    # 根据比例计算分割点
+                                    ratio_sum = ratio_parts[0] + ratio_parts[1]
+                                    part1_ratio = ratio_parts[0] / ratio_sum
+                                    split_point = int(total_count * part1_ratio + 0.5)  # 四舍五入
+                                    split_point = max(0, min(split_point, total_count))
+                                    
+                                    # src_out: 0=json_part1, 1=json_part2, 2=part1_count, 3=part2_count
+                                    if src_out == 2:
+                                        # part1_count
+                                        part1_count = split_point
+                                        logger.debug(f"[VVL] _resolve_int_input: JsonObjectSplitter part1_count={part1_count} (总数={total_count}, 比例={ratio_parts[0]}:{ratio_parts[1]})")
+                                        return part1_count
+                                    elif src_out == 3:
+                                        # part2_count
+                                        part2_count = total_count - split_point
+                                        logger.debug(f"[VVL] _resolve_int_input: JsonObjectSplitter part2_count={part2_count} (总数={total_count}, 比例={ratio_parts[0]}:{ratio_parts[1]})")
+                                        return part2_count
+                                    else:
+                                        logger.debug(f"[VVL] _resolve_int_input: JsonObjectSplitter 输出索引 {src_out} 不是 count 类型")
+                                else:
+                                    logger.debug(f"[VVL] _resolve_int_input: JsonObjectSplitter objects 不是列表类型")
+                            except Exception as e:
+                                logger.debug(f"[VVL] _resolve_int_input: JsonObjectSplitter JSON 解析失败: {e}")
+                        else:
+                            logger.debug(f"[VVL] _resolve_int_input: JsonObjectSplitter 无法解析 json_text")
+                    except Exception as e:
+                        logger.debug(f"[VVL] _resolve_int_input: 解析 JsonObjectSplitter 异常: {e}")
+
+                # 3) 解析 VVL listChunk：当 total 连接到其 num_chunks 输出时可以静态计算
                 if "listchunk" in ct.lower():
                     logger.debug(f"[VVL] _resolve_int_input: 检测到 VVL listChunk 节点，尝试静态解析")
                     try:
@@ -512,7 +574,7 @@ class VVLForLoopEndAsync:
                     except Exception as e:
                         logger.debug(f"[VVL] _resolve_int_input: 解析 listChunk 异常: {e}")
 
-                # 2) 解析 VVL mathInt（递归解析 a、b）
+                # 4) 解析 VVL mathInt（递归解析 a、b）
                 if "math" in ct.lower() and "int" in ct.lower():
                     logger.debug(f"[VVL] _resolve_int_input: 检测到 Math Int 节点")
                     op = node.get("inputs", {}).get("operation", "add")
@@ -670,6 +732,129 @@ class VVLForLoopEndAsync:
                     except Exception as e:
                         logger.debug(f"[VVL] _resolve_constant_string: VVL_Load_Text_Batch 整体处理异常: {e}")
                     # 继续执行其他处理逻辑，确保向后兼容
+                
+                # JsonObjectDeduplicator: 返回去重后的 JSON
+                elif "jsonobjectdeduplicator" in ct.lower():
+                    logger.debug(f"[VVL] _resolve_constant_string: 检测到 JsonObjectDeduplicator 节点")
+                    try:
+                        # 获取输出索引（0=deduplicated_json, 1=removed_duplicates）
+                        output_idx = val[1] if isinstance(val, (list, tuple)) and len(val) > 1 else 0
+                        
+                        # 获取输入的 json_text
+                        nested = src.get("inputs", {}).get("json_text", None)
+                        json_text = self._resolve_constant_string(dynprompt, nested)
+                        
+                        if isinstance(json_text, str) and json_text:
+                            import json as _json
+                            import re
+                            try:
+                                data = _json.loads(json_text)
+                                
+                                if output_idx == 0:
+                                    # deduplicated_json - 执行去重逻辑
+                                    if 'objects' in data and isinstance(data['objects'], list):
+                                        objects = data['objects']
+                                        unique_objects = []
+                                        seen_combinations = {}
+                                        
+                                        for obj in objects:
+                                            # 提取基础名称（去除数字后缀）
+                                            name = obj.get('name', '')
+                                            base_name = re.sub(r'\d+$', '', name).strip()
+                                            
+                                            # 获取 scale 作为元组
+                                            scale = obj.get('scale', [])
+                                            scale_tuple = tuple(scale) if isinstance(scale, list) else scale
+                                            
+                                            # 创建组合键
+                                            combination_key = (base_name, scale_tuple)
+                                            
+                                            if combination_key not in seen_combinations:
+                                                seen_combinations[combination_key] = True
+                                                unique_objects.append(obj)
+                                        
+                                        # 更新数据
+                                        data['objects'] = unique_objects
+                                        result = _json.dumps(data, ensure_ascii=False, indent=2)
+                                        logger.debug(f"[VVL] _resolve_constant_string: JsonObjectDeduplicator 去重，原始={len(objects)}，去重后={len(unique_objects)}")
+                                        return result
+                                    else:
+                                        # 没有 objects 字段，直接返回原始数据
+                                        return json_text
+                                elif output_idx == 1:
+                                    # removed_duplicates - 返回被移除的对象信息
+                                    # 这个输出通常用于调试，在编译期不太需要
+                                    logger.debug(f"[VVL] _resolve_constant_string: JsonObjectDeduplicator removed_duplicates 输出在编译期不支持")
+                                    return None
+                            except Exception as e:
+                                logger.debug(f"[VVL] _resolve_constant_string: JsonObjectDeduplicator JSON 处理失败: {e}")
+                    except Exception as e:
+                        logger.debug(f"[VVL] _resolve_constant_string: 解析 JsonObjectDeduplicator 异常: {e}")
+                
+                # JsonObjectSplitter: 复用其拆分逻辑，获取拆分后的 JSON 文本
+                elif "jsonobjectsplitter" in ct.lower():
+                    logger.debug(f"[VVL] _resolve_constant_string: 检测到 JsonObjectSplitter 节点")
+                    try:
+                        # 获取输出索引（0=json_part1, 1=json_part2）
+                        output_idx = val[1] if isinstance(val, (list, tuple)) and len(val) > 1 else 0
+                        
+                        # 获取输入参数
+                        inputs = src.get("inputs", {})
+                        nested = inputs.get("json_text", None)
+                        ratio_str = inputs.get("ratio", "1:1")
+                        
+                        # 解析比例参数
+                        ratio_parts = [1, 1]  # 默认 1:1
+                        try:
+                            ratio_str = str(ratio_str).strip()
+                            if ':' in ratio_str:
+                                parts = ratio_str.split(':')
+                                if len(parts) == 2:
+                                    ratio_parts[0] = float(parts[0].strip())
+                                    ratio_parts[1] = float(parts[1].strip())
+                                    if ratio_parts[0] <= 0 or ratio_parts[1] <= 0:
+                                        ratio_parts = [1, 1]
+                        except Exception:
+                            ratio_parts = [1, 1]
+                        
+                        # 获取输入的 json_text（这里会递归解析，如果上游是 JsonObjectDeduplicator 会自动去重）
+                        json_text = self._resolve_constant_string(dynprompt, nested)
+                        logger.debug(f"[VVL] _resolve_constant_string: JsonObjectSplitter 获取到上游 json_text，长度={len(json_text) if isinstance(json_text, str) else 0}, ratio={ratio_parts[0]}:{ratio_parts[1]}")
+                        
+                        if isinstance(json_text, str) and json_text:
+                            import json as _json
+                            import copy
+                            try:
+                                data = _json.loads(json_text)
+                                objects = data.get("objects", [])
+                                if isinstance(objects, list):
+                                    total_count = len(objects)
+                                    
+                                    # 根据比例计算分割点
+                                    ratio_sum = ratio_parts[0] + ratio_parts[1]
+                                    part1_ratio = ratio_parts[0] / ratio_sum
+                                    split_point = int(total_count * part1_ratio + 0.5)  # 四舍五入
+                                    split_point = max(0, min(split_point, total_count))
+                                    
+                                    # 创建拆分后的数据
+                                    if output_idx == 0:
+                                        # json_part1
+                                        data_part = copy.deepcopy(data)
+                                        data_part['objects'] = objects[:split_point]
+                                        result = _json.dumps(data_part, ensure_ascii=False, indent=2)
+                                        logger.debug(f"[VVL] _resolve_constant_string: JsonObjectSplitter json_part1，输入总数={total_count}，输出对象数={len(data_part['objects'])} (比例={ratio_parts[0]}:{ratio_parts[1]})")
+                                        return result
+                                    elif output_idx == 1:
+                                        # json_part2
+                                        data_part = copy.deepcopy(data)
+                                        data_part['objects'] = objects[split_point:]
+                                        result = _json.dumps(data_part, ensure_ascii=False, indent=2)
+                                        logger.debug(f"[VVL] _resolve_constant_string: JsonObjectSplitter json_part2，输入总数={total_count}，输出对象数={len(data_part['objects'])} (比例={ratio_parts[0]}:{ratio_parts[1]})")
+                                        return result
+                            except Exception as e:
+                                logger.debug(f"[VVL] _resolve_constant_string: JsonObjectSplitter JSON 处理失败: {e}")
+                    except Exception as e:
+                        logger.debug(f"[VVL] _resolve_constant_string: 解析 JsonObjectSplitter 异常: {e}")
                 
                 # JsonMarkdownCleaner: 复用其清理逻辑
                 elif "jsonmarkdowncleaner" in ct.lower():

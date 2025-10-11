@@ -68,6 +68,8 @@ NODE_CLASS_MAPPINGS = {
     "JsonScaleMaxAdjuster": JsonScaleMaxAdjuster,
     "JsonCompressor": JsonCompressor,
     "DimensionReorderAndScale": DimensionReorderAndScale,
+    "JsonObjectSplitter": JsonObjectSplitter,
+    "IndexOffsetAdjuster": IndexOffsetAdjuster,
     
     # Room Generator节点 (1个)
     "RoomBboxGeneratorNode": RoomBboxGeneratorNode,
@@ -120,7 +122,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "JsonScaleMaxAdjuster": "VVL JSON Scale Max Value Adjuster",
     "JsonCompressor": "VVL JSON Compressor",
     "DimensionReorderAndScale": "VVL Dimension Reorder and Scale",
-    
+    "JsonObjectSplitter": "VVL JSON Object Splitter",
+    "IndexOffsetAdjuster": "VVL Index Offset Adjuster",
     # Room Generator节点
     "RoomBboxGeneratorNode": "VVL 3D Room Box Json Generator",
     

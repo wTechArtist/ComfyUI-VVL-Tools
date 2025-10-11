@@ -1,6 +1,7 @@
 import json
 import re
 import ast
+import copy
 from comfy.comfy_types.node_typing import IO
 
 
@@ -1468,6 +1469,363 @@ class DimensionReorderAndScale:
             return (error_msg, 0.0, 0.0, 0.0)
 
 
+class JsonObjectSplitter:
+    """
+    JSON对象数组比例拆分器
+    
+    将JSON数据中的objects数组按比例拆分成两份：
+    • 保持其他所有字段不变（camera、subject、scene等）
+    • 只拆分objects数组为两部分
+    • 支持自定义拆分比例（如 "3:2"、"1:1"）
+    • 适用于需要分批处理场景对象的场景
+    
+    🎯 功能特性：
+    • 比例拆分：按指定比例分配objects
+    • 结构保持：除objects外的所有字段完全保留
+    • 智能分配：自动处理不能整除的情况
+    • 错误处理：提供详细的错误信息反馈
+    
+    📊 拆分规则（以 "3:2" 为例）：
+    • 10个对象 → 6个 + 4个（3:2 = 60%:40%）
+    • 5个对象 → 3个 + 2个
+    • 7个对象 → 4个 + 3个（向上取整）
+    
+    📝 比例格式：
+    • "1:1" - 平均拆分（默认）
+    • "3:2" - 60% vs 40%
+    • "2:1" - 66.7% vs 33.3%
+    • "4:1" - 80% vs 20%
+    
+    📝 使用场景：
+    • 分批处理大量场景对象
+    • 将场景拆分为前景和背景
+    • 按重要性分组管理对象
+    • 优化渲染和加载性能
+    
+    💡 处理逻辑：
+    1. 解析输入的JSON数据和比例参数
+    2. 提取objects数组
+    3. 根据比例计算分割点
+    4. 创建两份完整的JSON，分别包含相应比例的objects
+    5. 保持其他所有字段不变
+    
+    🔍 注意事项：
+    • 输入JSON必须包含objects字段
+    • objects必须是数组类型
+    • 如果objects为空，两个输出相同
+    • 拆分保持原始顺序不变
+    • 比例格式错误时使用默认的 1:1
+    
+    📈 拆分示例：
+    输入：10个objects，比例 "3:2"
+    输出1：前6个objects（60%）
+    输出2：后4个objects（40%）
+    
+    输入：5个objects，比例 "1:1"
+    输出1：前3个objects
+    输出2：后2个objects
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "json_text": (IO.STRING, {"multiline": True, "default": "", "tooltip": "包含objects数组的JSON数据\n将按比例拆分objects数组\n其他字段（camera、subject等）保持不变"})
+            },
+            "optional": {
+                "ratio": (IO.STRING, {"default": "1:1", "tooltip": "拆分比例\n格式: \"数字:数字\"\n• \"1:1\" - 平均拆分（默认）\n• \"3:2\" - 60% vs 40%\n• \"2:1\" - 66.7% vs 33.3%\n• \"4:1\" - 80% vs 20%\n第一个数字对应第一份输出"})
+            }
+        }
+    
+    RETURN_TYPES = (IO.STRING, IO.STRING, IO.INT, IO.INT)
+    RETURN_NAMES = ("json_part1", "json_part2", "part1_count", "part2_count")
+    FUNCTION = "split_objects"
+    CATEGORY = "VVL/json"
+    
+    def split_objects(self, json_text, ratio="1:1", **kwargs):
+        """将JSON中的objects数组按比例拆分成两份"""
+        try:
+            # 解析输入JSON
+            data = json.loads(json_text)
+            
+            # 检查是否有objects字段
+            if 'objects' not in data:
+                error_msg = "未找到objects字段"
+                print(f"JsonObjectSplitter error: {error_msg}")
+                return (
+                    json.dumps({"error": error_msg}, ensure_ascii=False), 
+                    json.dumps({"error": error_msg}, ensure_ascii=False),
+                    0,
+                    0
+                )
+            
+            if not isinstance(data['objects'], list):
+                error_msg = "objects字段不是数组类型"
+                print(f"JsonObjectSplitter error: {error_msg}")
+                return (
+                    json.dumps({"error": error_msg}, ensure_ascii=False),
+                    json.dumps({"error": error_msg}, ensure_ascii=False),
+                    0,
+                    0
+                )
+            
+            objects = data['objects']
+            total_count = len(objects)
+            
+            # 如果没有对象，返回两个相同的JSON
+            if total_count == 0:
+                print("JsonObjectSplitter: objects数组为空")
+                return (json_text, json_text, 0, 0)
+            
+            # 解析比例参数
+            ratio_parts = [1, 1]  # 默认 1:1
+            try:
+                ratio_str = str(ratio).strip()
+                if ':' in ratio_str:
+                    parts = ratio_str.split(':')
+                    if len(parts) == 2:
+                        ratio_parts[0] = float(parts[0].strip())
+                        ratio_parts[1] = float(parts[1].strip())
+                        
+                        # 验证比例值是否有效
+                        if ratio_parts[0] <= 0 or ratio_parts[1] <= 0:
+                            print(f"JsonObjectSplitter: 比例值无效 ({ratio_str})，使用默认 1:1")
+                            ratio_parts = [1, 1]
+                    else:
+                        print(f"JsonObjectSplitter: 比例格式错误 ({ratio_str})，使用默认 1:1")
+                else:
+                    print(f"JsonObjectSplitter: 比例格式错误 ({ratio_str})，使用默认 1:1")
+            except Exception as e:
+                print(f"JsonObjectSplitter: 解析比例时出错 ({ratio}): {e}，使用默认 1:1")
+                ratio_parts = [1, 1]
+            
+            # 计算分割点
+            # 根据比例计算第一份应该包含的对象数
+            ratio_sum = ratio_parts[0] + ratio_parts[1]
+            part1_ratio = ratio_parts[0] / ratio_sum
+            split_point = int(total_count * part1_ratio + 0.5)  # 四舍五入
+            
+            # 确保分割点在有效范围内
+            split_point = max(0, min(split_point, total_count))
+            
+            # 创建两份数据（使用深拷贝避免引用问题）
+            data1 = copy.deepcopy(data)
+            data1['objects'] = objects[:split_point]
+            
+            data2 = copy.deepcopy(data)
+            data2['objects'] = objects[split_point:]
+            
+            # 转换为JSON字符串
+            json_part1 = json.dumps(data1, ensure_ascii=False, indent=2)
+            json_part2 = json.dumps(data2, ensure_ascii=False, indent=2)
+            
+            # 获取拆分后的数量
+            part1_count = len(data1['objects'])
+            part2_count = len(data2['objects'])
+            
+            # 输出处理统计信息
+            part1_percent = (part1_count / total_count * 100) if total_count > 0 else 0
+            part2_percent = (part2_count / total_count * 100) if total_count > 0 else 0
+            
+            print(f"JsonObjectSplitter 拆分完成:")
+            print(f"  • 输入总对象数: {total_count}")
+            print(f"  • 设置比例: {ratio_parts[0]}:{ratio_parts[1]} ({ratio})")
+            print(f"  • 第一份对象数: {part1_count} ({part1_percent:.1f}%)")
+            print(f"  • 第二份对象数: {part2_count} ({part2_percent:.1f}%)")
+            print(f"  • 分割点索引: {split_point}")
+            
+            # 显示拆分详情
+            if total_count <= 10:
+                print(f"  • 第一份对象: {[obj.get('name', f'对象{i}') for i, obj in enumerate(data1['objects'])]}")
+                print(f"  • 第二份对象: {[obj.get('name', f'对象{i}') for i, obj in enumerate(data2['objects'])]}")
+            
+            return (json_part1, json_part2, part1_count, part2_count)
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON解析错误: {str(e)}"
+            print(f"JsonObjectSplitter error: {error_msg}")
+            return (
+                json.dumps({"error": error_msg}, ensure_ascii=False),
+                json.dumps({"error": error_msg}, ensure_ascii=False),
+                0,
+                0
+            )
+        except Exception as e:
+            error_msg = f"拆分JSON时出错: {str(e)}"
+            print(f"JsonObjectSplitter error: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return (
+                json.dumps({"error": error_msg}, ensure_ascii=False),
+                json.dumps({"error": error_msg}, ensure_ascii=False),
+                0,
+                0
+            )
+
+
+class IndexOffsetAdjuster:
+    """
+    索引偏移调整器
+    
+    调整字符串列表中每个元素的索引编号：
+    • 处理格式如 "0,value" 的字符串列表
+    • 给每个元素的第一个数字（索引）添加偏移量
+    • 保持逗号后的值部分不变
+    • 适用于需要重新编号或合并多个列表的场景
+    
+    🎯 功能特性：
+    • 索引偏移：给所有索引添加固定偏移量
+    • 格式保持：保持原始字符串格式
+    • 批量处理：一次性处理整个列表
+    • 灵活输入：支持多种输入格式
+    
+    📊 处理示例（offset=10）：
+    输入：["0,url1", "1,url2", "2,url3"]
+    输出：["10,url1", "11,url2", "12,url3"]
+    
+    输入：["5,data_a", "6,data_b", "7,data_c"]
+    输出：["15,data_a", "16,data_b", "17,data_c"]
+    
+    📝 使用场景：
+    • 合并多个批次的数据时重新编号
+    • 在循环中为每个批次设置不同的起始索引
+    • 将多个数据源的索引统一到同一命名空间
+    • 避免不同批次之间的索引冲突
+    
+    💡 处理逻辑：
+    1. 接收输入列表和偏移量
+    2. 遍历每个元素
+    3. 提取逗号前的索引数字
+    4. 给索引加上偏移量
+    5. 保持逗号后的内容不变
+    6. 重新组合字符串
+    
+    🔍 注意事项：
+    • 输入列表中的元素应该包含逗号分隔符
+    • 逗号前的部分应该是数字或可转换为数字的字符串
+    • 如果某个元素格式不正确，会跳过并保持原样
+    • 偏移量可以是负数（但要注意结果索引不要小于0）
+    
+    📈 工作流示例：
+    第一批：["0,url_a", "1,url_b"] → 循环处理
+    第二批：["0,url_c", "1,url_d"] → offset=2 → ["2,url_c", "3,url_d"] → 循环处理
+    这样可以避免两批数据的索引冲突
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "input_list": (IO.ANY, {"tooltip": "输入的列表数据\n格式: [\"索引,值\", ...]\n例如: [\"0,url1\", \"1,url2\", \"2,url3\"]"}),
+                "offset": (IO.INT, {"default": 0, "min": -99999, "max": 99999, "step": 1, "tooltip": "索引偏移量\n将添加到每个元素的索引上\n• 正数: 增加索引值\n• 负数: 减少索引值\n• 0: 保持不变"})
+            }
+        }
+    
+    RETURN_TYPES = (IO.ANY,)
+    RETURN_NAMES = ("adjusted_list",)
+    FUNCTION = "adjust_index_offset"
+    CATEGORY = "VVL/json"
+    
+    def adjust_index_offset(self, input_list, offset, **kwargs):
+        """调整列表中每个元素的索引偏移量"""
+        try:
+            # 处理输入数据
+            if input_list is None:
+                print("IndexOffsetAdjuster: 输入为空")
+                return ([],)
+            
+            # 如果输入是字符串，尝试解析为列表
+            if isinstance(input_list, str):
+                try:
+                    import json
+                    input_list = json.loads(input_list)
+                except Exception:
+                    print("IndexOffsetAdjuster: 无法将字符串解析为列表")
+                    return ([],)
+            
+            # 确保输入是列表类型
+            if not isinstance(input_list, (list, tuple)):
+                print(f"IndexOffsetAdjuster: 输入不是列表类型，类型={type(input_list)}")
+                return ([input_list],)
+            
+            # 处理列表
+            adjusted_list = []
+            processed_count = 0
+            skipped_count = 0
+            
+            for i, item in enumerate(input_list):
+                try:
+                    # 确保元素是字符串
+                    item_str = str(item) if not isinstance(item, str) else item
+                    
+                    # 检查是否包含逗号
+                    if ',' not in item_str:
+                        # 没有逗号，保持原样
+                        adjusted_list.append(item)
+                        skipped_count += 1
+                        continue
+                    
+                    # 分割字符串
+                    parts = item_str.split(',', 1)  # 只分割第一个逗号
+                    
+                    if len(parts) != 2:
+                        # 格式不正确，保持原样
+                        adjusted_list.append(item)
+                        skipped_count += 1
+                        continue
+                    
+                    # 提取索引和值部分
+                    index_str = parts[0].strip()
+                    value_part = parts[1]
+                    
+                    # 尝试将索引转换为数字
+                    try:
+                        original_index = int(index_str)
+                        new_index = original_index + offset
+                        
+                        # 重新组合字符串
+                        adjusted_item = f"{new_index},{value_part}"
+                        adjusted_list.append(adjusted_item)
+                        processed_count += 1
+                        
+                    except ValueError:
+                        # 索引部分不是数字，保持原样
+                        adjusted_list.append(item)
+                        skipped_count += 1
+                        
+                except Exception as e:
+                    # 处理单个元素时出错，保持原样
+                    print(f"IndexOffsetAdjuster: 处理元素 {i} 时出错: {e}")
+                    adjusted_list.append(item)
+                    skipped_count += 1
+            
+            # 输出处理统计信息
+            print(f"IndexOffsetAdjuster 处理完成:")
+            print(f"  • 输入元素数: {len(input_list)}")
+            print(f"  • 偏移量: {offset}")
+            print(f"  • 成功处理: {processed_count} 个")
+            print(f"  • 跳过/保持: {skipped_count} 个")
+            
+            # 显示处理示例（前3个元素）
+            if processed_count > 0 and len(input_list) <= 10:
+                print(f"  • 处理示例:")
+                for i in range(min(3, len(input_list))):
+                    if i < len(adjusted_list):
+                        original = str(input_list[i]) if i < len(input_list) else ""
+                        adjusted = str(adjusted_list[i])
+                        if original != adjusted:
+                            print(f"    [{i}] {original} → {adjusted}")
+            
+            return (adjusted_list,)
+            
+        except Exception as e:
+            error_msg = f"调整索引偏移量时出错: {str(e)}"
+            print(f"IndexOffsetAdjuster error: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return ([],)
+
+
 # Node class mappings
 NODE_CLASS_MAPPINGS = {
     "JsonObjectDeduplicator": JsonObjectDeduplicator,
@@ -1480,7 +1838,9 @@ NODE_CLASS_MAPPINGS = {
     "JsonRotationScaleAdjuster": JsonRotationScaleAdjuster,
     "JsonScaleMaxAdjuster": JsonScaleMaxAdjuster,
     "JsonCompressor": JsonCompressor,
-    "DimensionReorderAndScale": DimensionReorderAndScale
+    "DimensionReorderAndScale": DimensionReorderAndScale,
+    "JsonObjectSplitter": JsonObjectSplitter,
+    "IndexOffsetAdjuster": IndexOffsetAdjuster
 }
 
 # Node display name mappings
@@ -1496,4 +1856,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "JsonScaleMaxAdjuster": "VVL JSON Scale Max Value Adjuster",
     "JsonCompressor": "VVL JSON Compressor",
     "DimensionReorderAndScale": "VVL Dimension Reorder and Scale",
+    "JsonObjectSplitter": "VVL JSON Object Splitter",
+    "IndexOffsetAdjuster": "VVL Index Offset Adjuster",
 }
