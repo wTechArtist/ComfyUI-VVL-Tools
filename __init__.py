@@ -25,6 +25,7 @@ try:
     from .batch_text_loader import *
     from .text_combine_multi import *
     from .blender.processor_3d import *
+    from .blender.alignment_node import *
 except ImportError as e:
     print(f"\033[34mVVL Tools: \033[92mFailed to load some nodes: {e}\033[0m")
 
@@ -78,9 +79,10 @@ NODE_CLASS_MAPPINGS = {
     "VVL_Load_Text_Batch": VVL_Load_Text_Batch,
     "TextCombineMulti": TextCombineMulti,
     
-    # Blender节点 (2个)
+    # Blender节点 (3个)
     "ModelTransformParameters": ModelTransformParameters,
     "BlenderSmartModelScalerBatch": BlenderSmartModelScalerBatch,
+    "BlenderModelAligner": BlenderModelAligner,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -134,10 +136,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     # Blender节点
     "ModelTransformParameters": "VVL Model Transform Parameters",
     "BlenderSmartModelScalerBatch": "VVL Blender Smart Model Scaler Batch",
+    "BlenderModelAligner": "VVL Blender Model Aligner",
 }
 
 print("------------------------------------------")    
-print("\033[34mVVL Tools: \033[92m 30 Nodes Loaded\033[0m")
+print("\033[34mVVL Tools: \033[92m 31 Nodes Loaded\033[0m")
 print("------------------------------------------") 
 
 # 导出给ComfyUI
