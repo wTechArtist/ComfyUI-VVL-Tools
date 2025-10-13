@@ -88,11 +88,12 @@ class JsonObjectDeduplicator:
 
 class JsonObjectMerger:
     """
-    Merge processed JSON with removed duplicates, copying processed fields (3d_url, rotation, etc.) 
+    Merge processed JSON with removed duplicates, copying processed fields (output.url, rotation, etc.) 
     to objects with same name and scale.
     
     Updates restored duplicate objects with fields from their corresponding processed objects:
-    - 3d_url: Always copied if exists in processed object
+    - output: Always copied if exists in processed object (including output.url)
+    - 3d_url: For backward compatibility, also copied if exists
     - rotation: Always copied if exists in processed object
     - Additional fields can be easily added as needed
     
@@ -112,6 +113,46 @@ class JsonObjectMerger:
     RETURN_NAMES = ("merged_json",)
     FUNCTION = "merge_objects"
     CATEGORY = "VVL/json"
+    
+    def _copy_nested_field(self, source_obj, target_obj, field_path):
+        """
+        从源对象复制嵌套字段到目标对象
+        支持点号分隔的路径，如 "output.url"
+        """
+        if '.' not in field_path:
+            # 简单字段，直接复制
+            if field_path in source_obj:
+                target_obj[field_path] = source_obj[field_path]
+                return True
+            return False
+        
+        # 分割路径
+        path_parts = field_path.split('.')
+        
+        # 检查源对象中是否存在该路径
+        source_current = source_obj
+        for part in path_parts[:-1]:
+            if part not in source_current or not isinstance(source_current[part], dict):
+                return False
+            source_current = source_current[part]
+        
+        final_key = path_parts[-1]
+        if final_key not in source_current:
+            return False
+        
+        # 在目标对象中创建路径并复制值
+        target_current = target_obj
+        for part in path_parts[:-1]:
+            if part not in target_current:
+                target_current[part] = {}
+            elif not isinstance(target_current[part], dict):
+                # 如果中间路径不是字典，无法继续
+                return False
+            target_current = target_current[part]
+        
+        # 复制值
+        target_current[final_key] = source_current[final_key]
+        return True
     
     def merge_objects(self, processed_json, removed_duplicates, **kwargs):
         try:
@@ -146,6 +187,8 @@ class JsonObjectMerger:
             
             # Restore removed objects with updated fields from corresponding processed objects
             restored_objects = []
+            copy_count = 0
+            
             for removed_obj in removed_objects:
                 # Remove metadata fields
                 obj = {k: v for k, v in removed_obj.items() 
@@ -162,7 +205,12 @@ class JsonObjectMerger:
                     processed_obj = object_data_mapping[combination_key]
                     
                     # Copy specific fields from processed object to restored object
-                    # 3d_url - always copy if exists
+                    # output - 复制整个 output 对象（包括 output.url）
+                    if 'output' in processed_obj:
+                        obj['output'] = copy.deepcopy(processed_obj['output'])
+                        copy_count += 1
+                    
+                    # 3d_url - 为了向后兼容，也复制此字段（如果存在）
                     if '3d_url' in processed_obj:
                         obj['3d_url'] = processed_obj['3d_url']
                     
@@ -204,6 +252,12 @@ class JsonObjectMerger:
             
             # Create final JSON
             merged_json = json.dumps(processed_data, ensure_ascii=False, indent=2)
+            
+            # 输出处理统计
+            print(f"JsonObjectMerger 完成:")
+            print(f"  • 恢复的对象数: {len(restored_objects)}")
+            print(f"  • 复制 output 字段: {copy_count} 个")
+            print(f"  • 最终对象总数: {len(all_objects)}")
             
             return (merged_json,)
             
@@ -275,11 +329,18 @@ class JsonExtractSubjectNamesScales:
 
 class ApplyUrlsToJson:
     """
-    Apply a list of (index, url) pairs to deduplicated_json.objects[index].3d_url.
+    Apply a list of (index, url) pairs to JSON objects with nested field path support.
 
+    - Supports nested field paths like "output.url" or simple fields like "3d_url"
+    - Automatically creates intermediate objects if they don't exist
     - Robust to inputs shaped like [[idx, url], ...]
     - Skips entries with None url (configurable)
     - Ignores out-of-bounds indices (configurable)
+    
+    Example nested field paths:
+    - "output.url" → objects[idx].output.url = value
+    - "3d_url" → objects[idx].3d_url = value (backward compatible)
+    - "data.result.file_path" → objects[idx].data.result.file_path = value
     """
 
     @classmethod
@@ -290,7 +351,7 @@ class ApplyUrlsToJson:
                 "idx_url_list": (IO.ANY, {}),
             },
             "optional": {
-                "field_name": (IO.STRING, {"default": "3d_url"}),
+                "field_name": (IO.STRING, {"default": "output.url", "tooltip": "字段路径\n• 支持嵌套路径: 'output.url'\n• 支持简单字段: '3d_url'\n• 自动创建中间对象"}),
                 "skip_none_url": (IO.BOOLEAN, {"default": True, "label_on": "skip", "label_off": "write None"}),
                 "ignore_oob_index": (IO.BOOLEAN, {"default": True, "label_on": "ignore", "label_off": "error"}),
             },
@@ -351,8 +412,42 @@ class ApplyUrlsToJson:
         
         print(f"ApplyUrlsToJson normalized to: {pairs}")
         return pairs
+    
+    def _set_nested_field(self, obj, field_path, value):
+        """
+        设置嵌套字段值，支持点号分隔的路径
+        例如: "output.url" 会设置 obj["output"]["url"] = value
+        如果中间对象不存在，会自动创建
+        """
+        if not isinstance(obj, dict):
+            return False
+        
+        # 如果没有点号，直接设置
+        if '.' not in field_path:
+            obj[field_path] = value
+            return True
+        
+        # 分割路径
+        path_parts = field_path.split('.')
+        current = obj
+        
+        # 遍历到倒数第二个部分，创建/访问中间对象
+        for part in path_parts[:-1]:
+            if part not in current:
+                # 创建中间对象
+                current[part] = {}
+            elif not isinstance(current[part], dict):
+                # 中间路径存在但不是字典，无法继续
+                print(f"ApplyUrlsToJson: 字段路径 '{field_path}' 中的 '{part}' 不是对象类型，无法设置嵌套值")
+                return False
+            current = current[part]
+        
+        # 设置最后的字段
+        final_key = path_parts[-1]
+        current[final_key] = value
+        return True
 
-    def apply(self, deduplicated_json, idx_url_list, field_name="3d_url", skip_none_url=True, ignore_oob_index=True, **kwargs):
+    def apply(self, deduplicated_json, idx_url_list, field_name="output.url", skip_none_url=True, ignore_oob_index=True, **kwargs):
         try:
             data = json.loads(deduplicated_json)
         except json.JSONDecodeError as e:
@@ -364,14 +459,19 @@ class ApplyUrlsToJson:
         objects = data["objects"]
 
         pairs = self._normalize_pairs(idx_url_list)
+        success_count = 0
+        failed_count = 0
+        
         for raw_idx, url in pairs:
             try:
                 idx = int(raw_idx)
             except Exception:
+                failed_count += 1
                 continue
 
             if idx < 0 or idx >= len(objects):
                 if ignore_oob_index:
+                    failed_count += 1
                     continue
                 else:
                     return (json.dumps({"error": f"Index out of bounds: {idx}"}, ensure_ascii=False),)
@@ -381,7 +481,17 @@ class ApplyUrlsToJson:
 
             obj = objects[idx]
             if isinstance(obj, dict):
-                obj[field_name] = url
+                if self._set_nested_field(obj, field_name, url):
+                    success_count += 1
+                else:
+                    failed_count += 1
+        
+        # 输出处理统计
+        print(f"ApplyUrlsToJson 完成:")
+        print(f"  • 字段路径: '{field_name}'")
+        print(f"  • 成功设置: {success_count} 个")
+        if failed_count > 0:
+            print(f"  • 失败/跳过: {failed_count} 个")
 
         processed_json = json.dumps(data, ensure_ascii=False, indent=2)
         return (processed_json,)
