@@ -220,11 +220,15 @@ def create_reference_box_with_position_helper(obj_config, prefs, report_func):
         # 设置缩放
         box.scale = scale
         
+        # 【关键修复】强制更新视图层，确保scale立即生效
+        bpy.context.view_layer.update()
+        
         if prefs.show_debug_info:
             print(f"[批量预览] 创建参考Box: {box.name}")
             print(f"  位置: {position} {'(UE模式已转换)' if prefs.target_engine == 'UE' else ''}")
             print(f"  旋转: {rotation}°")
             print(f"  缩放: {scale}")
+            print(f"  实际尺寸: X={box.dimensions.x:.3f} Y={box.dimensions.y:.3f} Z={box.dimensions.z:.3f}")  # 验证
         
         return box
         
@@ -263,53 +267,150 @@ def align_model_to_box_preview_helper(model_obj, ref_box, context, prefs, report
             traceback.print_exc()
 
 
+def get_world_bbox_size(obj):
+    """计算物体在世界坐标系下的轴对齐包围盒（AABB）尺寸"""
+    # 获取物体的8个包围盒顶点在世界坐标系下的位置
+    bbox_corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    
+    # 计算世界坐标系下的最小和最大边界
+    min_x = min(corner.x for corner in bbox_corners)
+    max_x = max(corner.x for corner in bbox_corners)
+    min_y = min(corner.y for corner in bbox_corners)
+    max_y = max(corner.y for corner in bbox_corners)
+    min_z = min(corner.z for corner in bbox_corners)
+    max_z = max(corner.z for corner in bbox_corners)
+    
+    # 返回世界坐标系下的AABB尺寸
+    return Vector((max_x - min_x, max_y - min_y, max_z - min_z))
+
+
 def execute_perfect_align_batch_helper(ref_obj, target_obj, prefs):
-    """批量模式的完美重合对齐（直接按轴对应X-X, Y-Y, Z-Z）"""
+    """
+    批量模式的完美重合对齐（考虑旋转，按世界坐标系AABB匹配）
+    【完全复用Blender插件版本的算法】与model_alignment_tool完全一致
+    """
     if prefs.show_debug_info:
         print(f"[完美重合对齐] 开始处理:")
         print(f"  参考BOX: {ref_obj.name}")
         print(f"  目标模型: {target_obj.name}")
     
-    ref_dirs = get_bbox_directions_static(ref_obj)
-    target_dirs = get_bbox_directions_static(target_obj)
-    
-    ref_dims = ref_dirs['dimensions']
-    target_dims = target_dirs['dimensions']
+    # 【使用世界AABB】获取世界坐标系下的真实AABB尺寸（考虑旋转）
+    ref_world_size = get_world_bbox_size(ref_obj)
+    target_world_size_before = get_world_bbox_size(target_obj)
     
     if prefs.show_debug_info:
-        print(f"  参考BOX尺寸: X={ref_dims.x:.3f} Y={ref_dims.y:.3f} Z={ref_dims.z:.3f}")
-        print(f"  目标模型尺寸: X={target_dims.x:.3f} Y={target_dims.y:.3f} Z={target_dims.z:.3f}")
+        print(f"  参考BOX世界AABB: X={ref_world_size.x:.3f} Y={ref_world_size.y:.3f} Z={ref_world_size.z:.3f}")
+        print(f"  目标模型世界AABB: X={target_world_size_before.x:.3f} Y={target_world_size_before.y:.3f} Z={target_world_size_before.z:.3f}")
     
-    # 直接按轴对应计算缩放因子（X对X，Y对Y，Z对Z）
-    scale_factors = [1.0, 1.0, 1.0]
+    # 获取目标模型的旋转矩阵
+    loc, rot, scale = target_obj.matrix_world.decompose()
+    rot_matrix = rot.to_matrix()
     
-    if target_dims.x > 1e-6:
-        scale_factors[0] = ref_dims.x / target_dims.x
-    if target_dims.y > 1e-6:
-        scale_factors[1] = ref_dims.y / target_dims.y
-    if target_dims.z > 1e-6:
-        scale_factors[2] = ref_dims.z / target_dims.z
+    # 将世界坐标系的缩放需求转换到局部坐标系
+    # 计算每个局部轴在世界坐标系下占据的空间
+    local_x_in_world = rot_matrix @ Vector((1, 0, 0))
+    local_y_in_world = rot_matrix @ Vector((0, 1, 0))
+    local_z_in_world = rot_matrix @ Vector((0, 0, 1))
     
-    if prefs.show_debug_info:
-        print(f"  缩放因子（直接对应）: X={scale_factors[0]:.3f} Y={scale_factors[1]:.3f} Z={scale_factors[2]:.3f}")
-    
-    current_scale = target_obj.scale.copy()
-    new_scale = Vector((
-        current_scale.x * scale_factors[0],
-        current_scale.y * scale_factors[1],
-        current_scale.z * scale_factors[2]
+    # 计算局部轴对世界AABB各轴的贡献（绝对值）
+    local_x_contrib = Vector((
+        abs(local_x_in_world.x),
+        abs(local_x_in_world.y),
+        abs(local_x_in_world.z)
+    ))
+    local_y_contrib = Vector((
+        abs(local_y_in_world.x),
+        abs(local_y_in_world.y),
+        abs(local_y_in_world.z)
+    ))
+    local_z_contrib = Vector((
+        abs(local_z_in_world.x),
+        abs(local_z_in_world.y),
+        abs(local_z_in_world.z)
     ))
     
-    if prefs.show_debug_info:
-        print(f"  原始缩放: X={current_scale.x:.3f} Y={current_scale.y:.3f} Z={current_scale.z:.3f}")
-        print(f"  新缩放: X={new_scale.x:.3f} Y={new_scale.y:.3f} Z={new_scale.z:.3f}")
+    # 获取当前模型的局部尺寸（未缩放的基础尺寸）
+    current_scale = target_obj.scale.copy()
+    if abs(current_scale.x) > 1e-6:
+        base_dim_x = target_obj.dimensions.x / current_scale.x
+    else:
+        base_dim_x = 0.0
     
+    if abs(current_scale.y) > 1e-6:
+        base_dim_y = target_obj.dimensions.y / current_scale.y
+    else:
+        base_dim_y = 0.0
+    
+    if abs(current_scale.z) > 1e-6:
+        base_dim_z = target_obj.dimensions.z / current_scale.z
+    else:
+        base_dim_z = 0.0
+    
+    if prefs.show_debug_info:
+        print(f"  模型基础尺寸: X={base_dim_x:.3f} Y={base_dim_y:.3f} Z={base_dim_z:.3f}")
+        print(f"  当前缩放: X={current_scale.x:.3f} Y={current_scale.y:.3f} Z={current_scale.z:.3f}")
+    
+    # 构建从世界AABB到局部缩放的转换矩阵
+    # world_aabb = M * local_scale * base_dim
+    # 其中 M 是旋转贡献矩阵
+    import numpy as np
+    M = np.array([
+        [local_x_contrib.x * base_dim_x, local_y_contrib.x * base_dim_y, local_z_contrib.x * base_dim_z],
+        [local_x_contrib.y * base_dim_x, local_y_contrib.y * base_dim_y, local_z_contrib.y * base_dim_z],
+        [local_x_contrib.z * base_dim_x, local_y_contrib.z * base_dim_y, local_z_contrib.z * base_dim_z]
+    ])
+    
+    target_world = np.array([ref_world_size.x, ref_world_size.y, ref_world_size.z])
+    
+    # 求解局部缩放: M * local_scale = target_world
+    try:
+        new_scale_array = np.linalg.lstsq(M, target_world, rcond=None)[0]
+        new_scale = Vector((
+            max(new_scale_array[0], 0.001),  # 避免负值或零
+            max(new_scale_array[1], 0.001),
+            max(new_scale_array[2], 0.001)
+        ))
+    except:
+        # 如果求解失败，回退到简单匹配
+        if prefs.show_debug_info:
+            print(f"  警告: 矩阵求解失败，使用简化方法")
+        
+        # 简化方法：直接按世界AABB比例缩放
+        if target_world_size_before.x > 1e-6:
+            scale_x = ref_world_size.x / target_world_size_before.x
+        else:
+            scale_x = 1.0
+        
+        if target_world_size_before.y > 1e-6:
+            scale_y = ref_world_size.y / target_world_size_before.y
+        else:
+            scale_y = 1.0
+        
+        if target_world_size_before.z > 1e-6:
+            scale_z = ref_world_size.z / target_world_size_before.z
+        else:
+            scale_z = 1.0
+        
+        new_scale = Vector((
+            current_scale.x * scale_x,
+            current_scale.y * scale_y,
+            current_scale.z * scale_z
+        ))
+    
+    if prefs.show_debug_info:
+        print(f"  计算新缩放: X={new_scale.x:.3f} Y={new_scale.y:.3f} Z={new_scale.z:.3f}")
+    
+    # 应用新缩放
     target_obj.scale = new_scale
     bpy.context.view_layer.update()
     
+    # 验证结果
+    target_world_size_after = get_world_bbox_size(target_obj)
     if prefs.show_debug_info:
-        print(f"  应用缩放后模型尺寸: X={target_obj.dimensions.x:.3f} Y={target_obj.dimensions.y:.3f} Z={target_obj.dimensions.z:.3f}")
+        print(f"  应用缩放后世界AABB: X={target_world_size_after.x:.3f} Y={target_world_size_after.y:.3f} Z={target_world_size_after.z:.3f}")
+        print(f"  dimensions: X={target_obj.dimensions.x:.3f} Y={target_obj.dimensions.y:.3f} Z={target_obj.dimensions.z:.3f}")
     
+    # 对齐中心点
     ref_matrix = ref_obj.matrix_world
     ref_bbox_local_center = sum((Vector(corner) for corner in ref_obj.bound_box), Vector()) / 8
     ref_bbox_world_center = ref_matrix @ ref_bbox_local_center
