@@ -155,13 +155,21 @@ class BlenderModelAligner:
             # 5. 获取对齐脚本路径
             script_dir = os.path.dirname(os.path.abspath(__file__))
             alignment_script = os.path.join(script_dir, "alignment_script.py")
+            alignment_ops_script = os.path.join(script_dir, "alignment_ops.py")
             
             if not os.path.exists(alignment_script):
                 error_msg = f"对齐脚本不存在: {alignment_script}"
                 print(f"[Aligner] 错误: {error_msg}")
                 return (json.dumps({"error": error_msg}, ensure_ascii=False),)
             
+            # 检查 alignment_ops.py 是否存在（必需依赖）
+            if not os.path.exists(alignment_ops_script):
+                error_msg = f"核心函数库不存在: {alignment_ops_script}"
+                print(f"[Aligner] 错误: {error_msg}")
+                return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+            
             print(f"[Aligner] 对齐脚本: {alignment_script}")
+            print(f"[Aligner] 核心函数库: {alignment_ops_script}")
             
             # 6. 构建Blender命令
             blender_cmd = [
