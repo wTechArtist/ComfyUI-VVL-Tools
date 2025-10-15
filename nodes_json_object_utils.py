@@ -729,7 +729,9 @@ class JsonArrayElementFieldExtractor:
     ⚙️ 可配置参数：
     • index: 数组索引位置（支持正负数）
     • field_name: 要提取的字段名称
-    • return_empty_on_error: 错误处理方式
+    
+    ⚠️ 错误处理：
+    • 出错时统一返回字符串 "None"
     """
     
     @classmethod
@@ -741,7 +743,6 @@ class JsonArrayElementFieldExtractor:
             "optional": {
                 "index": (IO.INT, {"default": 0, "min": -999999, "max": 999999, "tooltip": "数组索引位置\n• 正数: 从头开始 (0=第1个, 1=第2个, ...)\n• 负数: 从尾开始 (-1=最后1个, -2=倒数第2个, ...)\n• 示例: 有5个元素的数组\n  索引 0,1,2,3,4 对应 第1,2,3,4,5个元素\n  索引 -1,-2,-3,-4,-5 对应 最后1,2,3,4,5个元素"}),
                 "field_name": (IO.STRING, {"default": "url", "tooltip": "要提取的字段名称\n• 默认: 'url'\n• 常用字段: name, cover, id, path 等\n• 支持任意对象属性名"}),
-                "return_empty_on_error": (IO.BOOLEAN, {"default": True, "label_on": "返回空值", "label_off": "返回错误信息", "tooltip": "出错时的处理方式\n• 开启: 出错返回空字符串 ''\n• 关闭: 出错返回错误信息描述\n推荐开启以保持工作流稳定性"}),
             },
         }
     
@@ -750,9 +751,13 @@ class JsonArrayElementFieldExtractor:
     FUNCTION = "extract_field_value"
     CATEGORY = "VVL/json"
     
-    def extract_field_value(self, json_array, index=0, field_name="url", return_empty_on_error=True, **kwargs):
+    def extract_field_value(self, json_array, index=0, field_name="url", **kwargs):
         """从数组中提取指定索引元素的字段值"""
         try:
+            # 如果输入是字符串 "None"，直接返回 "None"
+            if json_array == "None":
+                return ("None",)
+            
             # 处理输入数据
             data = json_array
             
@@ -761,49 +766,31 @@ class JsonArrayElementFieldExtractor:
                 try:
                     data = json.loads(json_array)
                 except json.JSONDecodeError:
-                    if return_empty_on_error:
-                        return ("",)
-                    else:
-                        return (f"错误: 无效的JSON字符串",)
+                    return ("None",)
             
             # 检查是否为列表/数组
             if not isinstance(data, list):
-                if return_empty_on_error:
-                    return ("",)
-                else:
-                    return (f"错误: 输入不是数组格式",)
+                return ("None",)
             
             # 检查数组是否为空
             if len(data) == 0:
-                if return_empty_on_error:
-                    return ("",)
-                else:
-                    return (f"错误: 数组为空",)
+                return ("None",)
             
             # 检查索引是否在有效范围内
             try:
                 # Python支持负数索引，但我们需要检查边界
                 if index >= len(data) or index < -len(data):
-                    if return_empty_on_error:
-                        return ("",)
-                    else:
-                        return (f"错误: 索引 {index} 超出数组范围 (0 到 {len(data)-1})",)
+                    return ("None",)
                 
                 # 获取指定索引的元素
                 target_element = data[index]
                 
             except IndexError:
-                if return_empty_on_error:
-                    return ("",)
-                else:
-                    return (f"错误: 索引 {index} 超出数组范围",)
+                return ("None",)
             
             # 检查目标元素是否为字典
             if not isinstance(target_element, dict):
-                if return_empty_on_error:
-                    return ("",)
-                else:
-                    return (f"错误: 索引 {index} 处的元素不是对象格式",)
+                return ("None",)
             
             # 提取指定字段的值
             field_value = target_element.get(field_name, "")
@@ -823,11 +810,7 @@ class JsonArrayElementFieldExtractor:
         except Exception as e:
             error_msg = f"提取字段值时出错: {str(e)}"
             print(f"JsonArrayElementFieldExtractor error: {error_msg}")
-            
-            if return_empty_on_error:
-                return ("",)
-            else:
-                return (error_msg,)
+            return ("None",)
 
 
 class JsonRotationScaleAdjuster:
