@@ -71,6 +71,7 @@ NODE_CLASS_MAPPINGS = {
     "DimensionReorderAndScale": DimensionReorderAndScale,
     "JsonObjectSplitter": JsonObjectSplitter,
     "IndexOffsetAdjuster": IndexOffsetAdjuster,
+    "JsonObjectOutputUrlCheck": JsonObjectOutputUrlCheck,
     
     # Room Generator节点 (1个)
     "RoomBboxGeneratorNode": RoomBboxGeneratorNode,
@@ -126,6 +127,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DimensionReorderAndScale": "VVL Dimension Reorder and Scale",
     "JsonObjectSplitter": "VVL JSON Object Splitter",
     "IndexOffsetAdjuster": "VVL Index Offset Adjuster",
+    "JsonObjectOutputUrlCheck": "VVL JSON Object Output URL Check",
     # Room Generator节点
     "RoomBboxGeneratorNode": "VVL 3D Room Box Json Generator",
     

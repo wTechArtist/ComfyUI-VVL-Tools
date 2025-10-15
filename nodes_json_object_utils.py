@@ -1756,6 +1756,219 @@ class JsonObjectSplitter:
             )
 
 
+class JsonObjectOutputUrlCheck:
+    """
+    JSON对象输出URL验证器
+    
+    验证并清理JSON中objects数组的对象，移除output.url无效的对象：
+    • 检查每个对象的output.url字段
+    • 验证URL是否包含有效的文件后缀
+    • 自动删除URL不完整或缺失后缀的对象
+    • 适用于处理3D模型生成结果的清理
+    
+    🎯 功能特性：
+    • URL验证：检查output.url是否存在且有效
+    • 后缀检测：验证文件是否有扩展名
+    • 自动清理：删除无效对象
+    • 详细统计：返回处理结果信息
+    
+    ✅ 有效URL示例：
+    • "https://example.com/model.glb"
+    • "/path/to/file.gltf"
+    • "model_123.obj"
+    
+    ❌ 无效URL示例：
+    • "https://example.com/incomplete"（无后缀）
+    • ""（空字符串）
+    • null（不存在）
+    
+    📝 使用场景：
+    • 清理3D模型生成失败的对象
+    • 验证API返回的URL完整性
+    • 过滤掉生成错误的场景对象
+    • 确保所有对象都有有效的资源链接
+    
+    💡 处理逻辑：
+    1. 解析输入JSON
+    2. 遍历objects数组
+    3. 检查每个对象的output.url
+    4. 验证URL是否有文件后缀
+    5. 移除无效对象
+    6. 返回清理后的JSON和统计信息
+    
+    🔍 注意事项：
+    • 默认检查 output.url 字段（可配置）
+    • 支持自定义有效文件扩展名列表
+    • 删除的对象信息会在removed_objects_info中返回
+    • 不区分文件扩展名大小写
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "json_text": (IO.STRING, {"multiline": True, "default": "", "tooltip": "包含objects数组的JSON数据\n将验证每个对象的output.url\n移除URL无效的对象"})
+            },
+            "optional": {
+                "valid_extensions": (IO.STRING, {
+                    "default": ".glb,.gltf,.obj,.fbx,.usdz,.dae", 
+                    "tooltip": "有效的文件扩展名列表\n用逗号分隔，不区分大小写\n默认: .glb,.gltf,.obj,.fbx,.usdz,.dae\n示例: .png,.jpg,.jpeg"
+                }),
+                "check_field_path": (IO.STRING, {
+                    "default": "output.url", 
+                    "tooltip": "要验证的字段路径\n支持嵌套路径，用点号分隔\n默认: output.url\n其他示例: 3d_url, data.file.path"
+                }),
+            },
+        }
+    
+    RETURN_TYPES = (IO.STRING, IO.STRING)
+    RETURN_NAMES = ("cleaned_json", "removed_objects_info")
+    FUNCTION = "validate_and_clean"
+    CATEGORY = "VVL/json"
+    
+    def _get_nested_field(self, obj, field_path):
+        """获取嵌套字段的值"""
+        if not isinstance(obj, dict):
+            return None
+        
+        if '.' not in field_path:
+            return obj.get(field_path)
+        
+        path_parts = field_path.split('.')
+        current = obj
+        
+        for part in path_parts:
+            if not isinstance(current, dict) or part not in current:
+                return None
+            current = current[part]
+        
+        return current
+    
+    def _has_valid_extension(self, url, valid_extensions):
+        """检查URL是否有有效的文件扩展名"""
+        if not url or not isinstance(url, str):
+            return False
+        
+        url = url.strip()
+        if not url:
+            return False
+        
+        # 检查是否有任何有效扩展名
+        url_lower = url.lower()
+        for ext in valid_extensions:
+            if url_lower.endswith(ext.lower()):
+                return True
+        
+        return False
+    
+    def validate_and_clean(self, json_text, valid_extensions=".glb,.gltf,.obj,.fbx,.usdz,.dae", check_field_path="output.url", **kwargs):
+        """验证并清理JSON中URL无效的对象"""
+        try:
+            # 解析输入JSON
+            data = json.loads(json_text)
+            
+            # 检查是否有objects字段
+            if 'objects' not in data or not isinstance(data['objects'], list):
+                print("JsonObjectOutputUrlValidator: 未找到有效的objects数组")
+                return (json_text, json.dumps({"error": "未找到有效的objects数组"}, ensure_ascii=False))
+            
+            objects = data['objects']
+            original_count = len(objects)
+            
+            if original_count == 0:
+                print("JsonObjectOutputUrlValidator: objects数组为空")
+                return (json_text, json.dumps({"message": "objects数组为空"}, ensure_ascii=False))
+            
+            # 解析有效扩展名列表
+            ext_list = [ext.strip() for ext in valid_extensions.split(',') if ext.strip()]
+            if not ext_list:
+                ext_list = ['.glb', '.gltf', '.obj', '.fbx', '.usdz', '.dae']
+            
+            # 验证对象并分类
+            valid_objects = []
+            removed_objects = []
+            
+            for i, obj in enumerate(objects):
+                if not isinstance(obj, dict):
+                    removed_objects.append({
+                        "index": i,
+                        "reason": "对象不是字典类型",
+                        "object": obj
+                    })
+                    continue
+                
+                # 获取URL字段
+                url = self._get_nested_field(obj, check_field_path)
+                
+                # 验证URL
+                if url is None:
+                    removed_objects.append({
+                        "index": i,
+                        "name": obj.get("name", f"对象{i}"),
+                        "reason": f"缺少字段: {check_field_path}",
+                        "object": obj
+                    })
+                elif not self._has_valid_extension(url, ext_list):
+                    removed_objects.append({
+                        "index": i,
+                        "name": obj.get("name", f"对象{i}"),
+                        "reason": f"URL无有效扩展名: {url}",
+                        "url": url,
+                        "object": obj
+                    })
+                else:
+                    # URL有效，保留对象
+                    valid_objects.append(obj)
+            
+            # 更新数据
+            data['objects'] = valid_objects
+            
+            # 生成清理后的JSON
+            cleaned_json = json.dumps(data, ensure_ascii=False, indent=2)
+            
+            # 生成移除对象信息
+            removed_info = {
+                "original_count": original_count,
+                "valid_count": len(valid_objects),
+                "removed_count": len(removed_objects),
+                "removed_objects": removed_objects
+            }
+            removed_info_json = json.dumps(removed_info, ensure_ascii=False, indent=2)
+            
+            # 输出处理统计信息
+            print(f"JsonObjectOutputUrlValidator 处理完成:")
+            print(f"  • 检查字段: {check_field_path}")
+            print(f"  • 有效扩展名: {', '.join(ext_list)}")
+            print(f"  • 原始对象数: {original_count}")
+            print(f"  • 有效对象数: {len(valid_objects)}")
+            print(f"  • 移除对象数: {len(removed_objects)}")
+            
+            # 显示移除详情
+            if removed_objects:
+                print(f"  • 移除的对象详情:")
+                for item in removed_objects[:5]:  # 只显示前5个
+                    name = item.get('name', f"索引{item.get('index', '?')}")
+                    reason = item.get('reason', '未知原因')
+                    print(f"    - {name}: {reason}")
+                if len(removed_objects) > 5:
+                    print(f"    ... 还有 {len(removed_objects) - 5} 个对象被移除")
+            
+            return (cleaned_json, removed_info_json)
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON解析错误: {str(e)}"
+            print(f"JsonObjectOutputUrlValidator error: {error_msg}")
+            error_json = json.dumps({"error": error_msg}, ensure_ascii=False)
+            return (error_json, error_json)
+        except Exception as e:
+            error_msg = f"验证URL时出错: {str(e)}"
+            print(f"JsonObjectOutputUrlValidator error: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            error_json = json.dumps({"error": error_msg}, ensure_ascii=False)
+            return (error_json, error_json)
+
+
 class IndexOffsetAdjuster:
     """
     索引偏移调整器
@@ -1933,7 +2146,8 @@ NODE_CLASS_MAPPINGS = {
     "JsonCompressor": JsonCompressor,
     "DimensionReorderAndScale": DimensionReorderAndScale,
     "JsonObjectSplitter": JsonObjectSplitter,
-    "IndexOffsetAdjuster": IndexOffsetAdjuster
+    "IndexOffsetAdjuster": IndexOffsetAdjuster,
+    "JsonObjectOutputUrlCheck": JsonObjectOutputUrlCheck
 }
 
 # Node display name mappings
@@ -1951,4 +2165,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DimensionReorderAndScale": "VVL Dimension Reorder and Scale",
     "JsonObjectSplitter": "VVL JSON Object Splitter",
     "IndexOffsetAdjuster": "VVL Index Offset Adjuster",
+    "JsonObjectOutputUrlCheck": "VVL JSON Object Output URL Check"
 }
