@@ -137,15 +137,13 @@ def main():
                 continue
             
             # 4. 执行完美重合对齐（完全调用 alignment_ops.py）
-            # 【与批量预览+导出一致】使用 align_model_to_box_preview_helper
+            # 注意：使用 execute_perfect_align_batch_helper 而不是 align_model_to_box_preview_helper
+            # 因为后者包含 bpy.ops 操作符，在后台模式下可能崩溃
             print(f"  → 对齐到参考Box")
-            bpy.context.view_layer.objects.active = model_obj
-            alignment_ops.align_model_to_box_preview_helper(
-                model_obj=model_obj,
-                ref_box=ref_box,
-                context=bpy.context,
-                prefs=prefs,
-                report_func=mock_report
+            alignment_ops.execute_perfect_align_batch_helper(
+                ref_obj=ref_box,
+                target_obj=model_obj,
+                prefs=prefs
             )
             
             # 5. 删除参考Box（独立脚本不需要预览，所以删除）
