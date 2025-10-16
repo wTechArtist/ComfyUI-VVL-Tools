@@ -1969,6 +1969,418 @@ class JsonObjectOutputUrlCheck:
             return (error_json, error_json)
 
 
+class JsonFieldRenamer:
+    """
+    JSON字段重命名/移动节点
+    
+    将JSON中objects数组的对象字段从一个路径移动到另一个路径：
+    • 支持简单字段到嵌套字段的转换（如 3d_url → output.url）
+    • 支持嵌套字段到简单字段的转换（如 output.url → 3d_url）
+    • 支持嵌套字段到嵌套字段的转换
+    • 自动创建必要的中间对象
+    • 可选择是否删除源字段
+    
+    🎯 功能特性：
+    • 字段移动：将值从源字段复制到目标字段
+    • 路径支持：支持点号分隔的嵌套路径
+    • 自动创建：自动创建目标路径的中间对象
+    • 源字段处理：可选删除或保留源字段
+    
+    📝 使用场景：
+    • 字段重命名：3d_url → output.url
+    • 结构调整：扁平字段转嵌套结构
+    • 数据迁移：旧字段格式转新格式
+    • API适配：适配不同接口的字段要求
+    
+    💡 处理逻辑：
+    1. 遍历objects数组中的每个对象
+    2. 从源字段路径获取值
+    3. 在目标字段路径设置值（自动创建中间对象）
+    4. 可选删除源字段
+    5. 保持其他字段不变
+    
+    🔍 注意事项：
+    • 如果源字段不存在，跳过该对象
+    • 如果目标字段已存在，会被覆盖
+    • 路径使用点号分隔（如 output.url）
+    • 删除源字段可能影响其他依赖该字段的逻辑
+    
+    📊 使用示例：
+    源字段: "3d_url"
+    目标字段: "output.url"
+    remove_source: True
+    
+    转换前: {"name": "chair", "3d_url": "model.glb"}
+    转换后: {"name": "chair", "output": {"url": "model.glb"}}
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "json_text": (IO.STRING, {"multiline": True, "default": "", "tooltip": "包含objects数组的JSON数据\n将对所有对象进行字段重命名/移动"}),
+                "source_field": (IO.STRING, {"default": "3d_url", "tooltip": "源字段路径\n支持简单字段: 3d_url\n支持嵌套路径: data.url, output.file.path"}),
+                "target_field": (IO.STRING, {"default": "output.url", "tooltip": "目标字段路径\n支持简单字段: 3d_url\n支持嵌套路径: output.url, data.result.path"}),
+            },
+            "optional": {
+                "remove_source": (IO.BOOLEAN, {
+                    "default": True, 
+                    "label_on": "删除源字段", 
+                    "label_off": "保留源字段",
+                    "tooltip": "是否删除源字段\n• 开启: 移动字段（删除源字段）\n• 关闭: 复制字段（保留源字段）"
+                }),
+            }
+        }
+    
+    RETURN_TYPES = (IO.STRING,)
+    RETURN_NAMES = ("processed_json",)
+    FUNCTION = "rename_field"
+    CATEGORY = "VVL/json"
+    
+    def _get_nested_field(self, obj, field_path):
+        """
+        从对象获取嵌套字段的值
+        支持点号分隔的路径，如 "output.url"
+        """
+        if not isinstance(obj, dict):
+            return None
+        
+        # 如果没有点号，直接获取
+        if '.' not in field_path:
+            return obj.get(field_path)
+        
+        # 分割路径
+        path_parts = field_path.split('.')
+        current = obj
+        
+        # 遍历路径
+        for part in path_parts:
+            if not isinstance(current, dict) or part not in current:
+                return None
+            current = current[part]
+        
+        return current
+    
+    def _set_nested_field(self, obj, field_path, value):
+        """
+        设置嵌套字段值，支持点号分隔的路径
+        例如: "output.url" 会设置 obj["output"]["url"] = value
+        如果中间对象不存在，会自动创建
+        """
+        if not isinstance(obj, dict):
+            return False
+        
+        # 如果没有点号，直接设置
+        if '.' not in field_path:
+            obj[field_path] = value
+            return True
+        
+        # 分割路径
+        path_parts = field_path.split('.')
+        current = obj
+        
+        # 遍历到倒数第二个部分，创建/访问中间对象
+        for part in path_parts[:-1]:
+            if part not in current:
+                # 创建中间对象
+                current[part] = {}
+            elif not isinstance(current[part], dict):
+                # 中间路径存在但不是字典，无法继续
+                print(f"JsonFieldRenamer: 字段路径 '{field_path}' 中的 '{part}' 不是对象类型，无法设置嵌套值")
+                return False
+            current = current[part]
+        
+        # 设置最后的字段
+        final_key = path_parts[-1]
+        current[final_key] = value
+        return True
+    
+    def _delete_nested_field(self, obj, field_path):
+        """
+        删除嵌套字段
+        支持点号分隔的路径
+        """
+        if not isinstance(obj, dict):
+            return False
+        
+        # 如果没有点号，直接删除
+        if '.' not in field_path:
+            if field_path in obj:
+                del obj[field_path]
+                return True
+            return False
+        
+        # 分割路径
+        path_parts = field_path.split('.')
+        current = obj
+        
+        # 遍历到倒数第二个部分
+        for part in path_parts[:-1]:
+            if not isinstance(current, dict) or part not in current:
+                return False
+            current = current[part]
+        
+        # 删除最后的字段
+        final_key = path_parts[-1]
+        if isinstance(current, dict) and final_key in current:
+            del current[final_key]
+            return True
+        
+        return False
+    
+    def rename_field(self, json_text, source_field="3d_url", target_field="output.url", remove_source=True, **kwargs):
+        """重命名/移动JSON对象中的字段"""
+        try:
+            # 解析输入JSON
+            data = json.loads(json_text)
+            
+            # 检查是否有objects字段
+            if 'objects' not in data or not isinstance(data['objects'], list):
+                print("JsonFieldRenamer: 未找到有效的objects数组")
+                return (json_text,)
+            
+            objects = data['objects']
+            
+            if len(objects) == 0:
+                print("JsonFieldRenamer: objects数组为空")
+                return (json_text,)
+            
+            # 统计处理结果
+            processed_count = 0
+            skipped_count = 0
+            error_count = 0
+            
+            # 遍历所有对象
+            for i, obj in enumerate(objects):
+                if not isinstance(obj, dict):
+                    skipped_count += 1
+                    continue
+                
+                # 获取源字段的值
+                source_value = self._get_nested_field(obj, source_field)
+                
+                # 如果源字段不存在，跳过
+                if source_value is None:
+                    skipped_count += 1
+                    continue
+                
+                # 设置目标字段的值
+                if self._set_nested_field(obj, target_field, source_value):
+                    processed_count += 1
+                    
+                    # 如果需要删除源字段
+                    if remove_source:
+                        self._delete_nested_field(obj, source_field)
+                else:
+                    error_count += 1
+            
+            # 生成处理后的JSON
+            processed_json = json.dumps(data, ensure_ascii=False, indent=2)
+            
+            # 输出处理统计信息
+            print(f"JsonFieldRenamer 处理完成:")
+            print(f"  • 源字段: '{source_field}'")
+            print(f"  • 目标字段: '{target_field}'")
+            print(f"  • 删除源字段: {'是' if remove_source else '否'}")
+            print(f"  • 总对象数: {len(objects)}")
+            print(f"  • 成功处理: {processed_count} 个")
+            print(f"  • 跳过处理: {skipped_count} 个 (源字段不存在)")
+            if error_count > 0:
+                print(f"  • 处理失败: {error_count} 个")
+            
+            return (processed_json,)
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON解析错误: {str(e)}"
+            print(f"JsonFieldRenamer error: {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+        except Exception as e:
+            error_msg = f"重命名字段时出错: {str(e)}"
+            print(f"JsonFieldRenamer error: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+
+
+class JsonFieldDeleter:
+    """
+    JSON字段删除节点
+    
+    删除JSON中objects数组的对象中的指定字段：
+    • 支持同时删除最多3个字段
+    • 支持删除简单字段（如 3d_url）
+    • 支持删除嵌套字段（如 output.url）
+    • 批量处理所有对象
+    • 提供详细的删除统计信息
+    
+    🎯 功能特性：
+    • 多字段删除：一次性删除1-3个字段
+    • 路径支持：支持点号分隔的嵌套路径
+    • 批量操作：一次性处理所有对象
+    • 安全处理：字段不存在时自动跳过
+    
+    📝 使用场景：
+    • 清理不需要的字段
+    • 移除临时数据
+    • 精简JSON结构
+    • 数据隐私处理
+    
+    💡 处理逻辑：
+    1. 遍历objects数组中的每个对象
+    2. 检查指定的3个字段是否存在
+    3. 删除存在的字段
+    4. 跳过不包含该字段的对象
+    5. 保持其他字段不变
+    
+    🔍 注意事项：
+    • 删除操作不可逆，请谨慎使用
+    • 如果字段不存在，会跳过该对象
+    • 支持删除嵌套字段（如 output.url）
+    • 删除嵌套字段不会删除父对象
+    • 空字段名会被忽略
+    
+    📊 使用示例：
+    字段1: "3d_url", 字段2: "temp_data", 字段3: ""
+    
+    删除前: {"name": "chair", "3d_url": "model.glb", "temp_data": "xxx", "scale": [1,1,1]}
+    删除后: {"name": "chair", "scale": [1,1,1]}
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "json_text": (IO.STRING, {"multiline": True, "default": "", "tooltip": "包含objects数组的JSON数据\n将从所有对象中删除指定字段"}),
+                "field_to_delete_1": (IO.STRING, {"default": "", "tooltip": "要删除的第1个字段路径\n• 简单字段: 3d_url, status, temp_data\n• 嵌套字段: output.url, data.temp.value\n支持点号分隔的嵌套路径"}),
+            },
+            "optional": {
+                "field_to_delete_2": (IO.STRING, {"default": "", "tooltip": "要删除的第2个字段路径（可选）\n留空则不删除\n支持简单字段和嵌套字段"}),
+                "field_to_delete_3": (IO.STRING, {"default": "", "tooltip": "要删除的第3个字段路径（可选）\n留空则不删除\n支持简单字段和嵌套字段"}),
+            }
+        }
+    
+    RETURN_TYPES = (IO.STRING,)
+    RETURN_NAMES = ("processed_json",)
+    FUNCTION = "delete_field"
+    CATEGORY = "VVL/json"
+    
+    def _delete_nested_field(self, obj, field_path):
+        """
+        删除嵌套字段
+        支持点号分隔的路径
+        返回是否成功删除
+        """
+        if not isinstance(obj, dict):
+            return False
+        
+        # 如果没有点号，直接删除
+        if '.' not in field_path:
+            if field_path in obj:
+                del obj[field_path]
+                return True
+            return False
+        
+        # 分割路径
+        path_parts = field_path.split('.')
+        current = obj
+        
+        # 遍历到倒数第二个部分
+        for part in path_parts[:-1]:
+            if not isinstance(current, dict) or part not in current:
+                return False
+            current = current[part]
+        
+        # 删除最后的字段
+        final_key = path_parts[-1]
+        if isinstance(current, dict) and final_key in current:
+            del current[final_key]
+            return True
+        
+        return False
+    
+    def delete_field(self, json_text, field_to_delete_1="3d_url", field_to_delete_2="", field_to_delete_3="", **kwargs):
+        """从JSON对象中删除指定的1-3个字段"""
+        try:
+            # 解析输入JSON
+            data = json.loads(json_text)
+            
+            # 检查是否有objects字段
+            if 'objects' not in data or not isinstance(data['objects'], list):
+                print("JsonFieldDeleter: 未找到有效的objects数组")
+                return (json_text,)
+            
+            objects = data['objects']
+            
+            if len(objects) == 0:
+                print("JsonFieldDeleter: objects数组为空")
+                return (json_text,)
+            
+            # 收集有效的字段名称
+            fields_to_delete = []
+            for field_name in [field_to_delete_1, field_to_delete_2, field_to_delete_3]:
+                if field_name and field_name.strip():
+                    fields_to_delete.append(field_name.strip())
+            
+            # 验证是否有字段需要删除
+            if not fields_to_delete:
+                print("JsonFieldDeleter: 没有指定要删除的字段")
+                return (json_text,)
+            
+            # 统计删除结果（按字段）
+            field_stats = {field: {"deleted": 0, "skipped": 0} for field in fields_to_delete}
+            total_operations = 0
+            total_successful = 0
+            
+            # 遍历所有对象
+            for i, obj in enumerate(objects):
+                if not isinstance(obj, dict):
+                    for field in fields_to_delete:
+                        field_stats[field]["skipped"] += 1
+                    continue
+                
+                # 删除所有指定的字段
+                for field_name in fields_to_delete:
+                    total_operations += 1
+                    if self._delete_nested_field(obj, field_name):
+                        field_stats[field_name]["deleted"] += 1
+                        total_successful += 1
+                    else:
+                        field_stats[field_name]["skipped"] += 1
+            
+            # 生成处理后的JSON
+            processed_json = json.dumps(data, ensure_ascii=False, indent=2)
+            
+            # 输出处理统计信息
+            print(f"JsonFieldDeleter 处理完成:")
+            print(f"  • 总对象数: {len(objects)}")
+            print(f"  • 要删除的字段数: {len(fields_to_delete)} 个")
+            print(f"  • 总删除操作: {total_operations} 次")
+            print(f"  • 成功删除: {total_successful} 次")
+            
+            # 按字段输出详细统计
+            print(f"\n  详细统计:")
+            for i, field_name in enumerate(fields_to_delete, 1):
+                deleted = field_stats[field_name]["deleted"]
+                skipped = field_stats[field_name]["skipped"]
+                success_rate = (deleted / len(objects) * 100) if len(objects) > 0 else 0
+                print(f"    字段{i} '{field_name}':")
+                print(f"      - 成功删除: {deleted} 个对象 ({success_rate:.1f}%)")
+                print(f"      - 跳过: {skipped} 个对象 (字段不存在)")
+            
+            return (processed_json,)
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON解析错误: {str(e)}"
+            print(f"JsonFieldDeleter error: {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+        except Exception as e:
+            error_msg = f"删除字段时出错: {str(e)}"
+            print(f"JsonFieldDeleter error: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+
+
 class IndexOffsetAdjuster:
     """
     索引偏移调整器
@@ -2147,7 +2559,9 @@ NODE_CLASS_MAPPINGS = {
     "DimensionReorderAndScale": DimensionReorderAndScale,
     "JsonObjectSplitter": JsonObjectSplitter,
     "IndexOffsetAdjuster": IndexOffsetAdjuster,
-    "JsonObjectOutputUrlCheck": JsonObjectOutputUrlCheck
+    "JsonObjectOutputUrlCheck": JsonObjectOutputUrlCheck,
+    "JsonFieldRenamer": JsonFieldRenamer,
+    "JsonFieldDeleter": JsonFieldDeleter
 }
 
 # Node display name mappings
@@ -2165,5 +2579,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DimensionReorderAndScale": "VVL Dimension Reorder and Scale",
     "JsonObjectSplitter": "VVL JSON Object Splitter",
     "IndexOffsetAdjuster": "VVL Index Offset Adjuster",
-    "JsonObjectOutputUrlCheck": "VVL JSON Object Output URL Check"
+    "JsonObjectOutputUrlCheck": "VVL JSON Object Output URL Check",
+    "JsonFieldRenamer": "VVL JSON Field Renamer",
+    "JsonFieldDeleter": "VVL JSON Field Deleter"
 }
