@@ -444,22 +444,6 @@ def export_model_glb_helper(report_func, model_obj, obj_config, output_dir, pref
             print(f"[批量对齐] 准备导出GLB: {model_name} -> {output_path}")
             print(f"[批量对齐] 目标引擎检查: target_engine = '{prefs.target_engine}'")
         
-        # UE模式：导出前应用Z轴180度旋转修正（对应UE的Yaw调整）
-        original_rotation = None
-        if prefs.target_engine == 'UE':
-            # 保存原始旋转
-            original_rotation = model_obj.rotation_euler.copy()
-            
-            # 应用Z轴180度旋转（对应UE中Yaw=-180度，修正左右镜像）
-            from math import radians
-            model_obj.rotation_euler.z += radians(180)
-            bpy.context.view_layer.update()
-            
-            if prefs.show_debug_info:
-                print(f"[批量对齐] UE模式：应用Z轴180度旋转修正（Yaw）- GLB")
-                print(f"  原始旋转: X={original_rotation.x*180/3.14159:.1f}° Y={original_rotation.y*180/3.14159:.1f}° Z={original_rotation.z*180/3.14159:.1f}°")
-                print(f"  导出旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
-        
         # 取消所有选择
         bpy.ops.object.select_all(action='DESELECT')
         
@@ -473,25 +457,6 @@ def export_model_glb_helper(report_func, model_obj, obj_config, output_dir, pref
         if prefs.show_debug_info:
             print(f"[批量对齐] 选中对象: {model_obj.name} 及其 {len(model_obj.children_recursive)} 个子对象")
         
-        # 移除所有材质中的法线贴图节点（避免错误的法线贴图导致显示问题）
-        for obj in [model_obj] + list(model_obj.children_recursive):
-            if obj.type == 'MESH' and obj.data.materials:
-                for mat_slot in obj.material_slots:
-                    if mat_slot.material and mat_slot.material.use_nodes:
-                        mat = mat_slot.material
-                        nodes_to_remove = []
-                        
-                        # 查找法线贴图节点
-                        for node in mat.node_tree.nodes:
-                            if node.type == 'NORMAL_MAP':
-                                nodes_to_remove.append(node)
-                        
-                        # 移除法线贴图节点
-                        for node in nodes_to_remove:
-                            if prefs.show_debug_info:
-                                print(f"[批量对齐] 移除法线贴图节点: {mat.name} -> {node.name}")
-                            mat.node_tree.nodes.remove(node)
-        
         # 导出为GLB格式
         bpy.ops.export_scene.gltf(
             filepath=output_path,
@@ -502,14 +467,6 @@ def export_model_glb_helper(report_func, model_obj, obj_config, output_dir, pref
             export_materials='EXPORT',
             export_image_format='AUTO',
         )
-        
-        # UE模式：导出后恢复原始旋转
-        if prefs.target_engine == 'UE' and original_rotation is not None:
-            model_obj.rotation_euler = original_rotation
-            bpy.context.view_layer.update()
-            
-            if prefs.show_debug_info:
-                print(f"[批量对齐] UE模式：导出后恢复原始旋转 - GLB")
         
         if prefs.show_debug_info:
             file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
@@ -538,22 +495,6 @@ def export_model_fbx_helper(report_func, model_obj, obj_config, output_dir, pref
         if prefs.show_debug_info:
             print(f"[批量对齐] 准备导出: {model_name} -> {output_path}")
         
-        # UE模式：导出前应用Z轴180度旋转修正（对应UE的Yaw调整）
-        original_rotation = None
-        if prefs.target_engine == 'UE':
-            # 保存原始旋转
-            original_rotation = model_obj.rotation_euler.copy()
-            
-            # 应用Z轴180度旋转（对应UE中Yaw=-180度，修正左右镜像）
-            from math import radians
-            model_obj.rotation_euler.z += radians(180)
-            bpy.context.view_layer.update()
-            
-            if prefs.show_debug_info:
-                print(f"[批量对齐] UE模式：应用Z轴180度旋转修正（Yaw）")
-                print(f"  原始旋转: X={original_rotation.x*180/3.14159:.1f}° Y={original_rotation.y*180/3.14159:.1f}° Z={original_rotation.z*180/3.14159:.1f}°")
-                print(f"  导出旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
-        
         # 取消所有选择
         bpy.ops.object.select_all(action='DESELECT')
         
@@ -566,25 +507,6 @@ def export_model_fbx_helper(report_func, model_obj, obj_config, output_dir, pref
         
         if prefs.show_debug_info:
             print(f"[批量对齐] 选中对象: {model_obj.name} 及其 {len(model_obj.children_recursive)} 个子对象")
-        
-        # 移除所有材质中的法线贴图节点（避免错误的法线贴图导致显示问题）
-        for obj in [model_obj] + list(model_obj.children_recursive):
-            if obj.type == 'MESH' and obj.data.materials:
-                for mat_slot in obj.material_slots:
-                    if mat_slot.material and mat_slot.material.use_nodes:
-                        mat = mat_slot.material
-                        nodes_to_remove = []
-                        
-                        # 查找法线贴图节点
-                        for node in mat.node_tree.nodes:
-                            if node.type == 'NORMAL_MAP':
-                                nodes_to_remove.append(node)
-                        
-                        # 移除法线贴图节点
-                        for node in nodes_to_remove:
-                            if prefs.show_debug_info:
-                                print(f"[批量对齐] 移除法线贴图节点: {mat.name} -> {node.name}")
-                            mat.node_tree.nodes.remove(node)
         
         # 导出为FBX格式（UE专用轴向：Forward=-Y, Up=Z）
         bpy.ops.export_scene.fbx(
@@ -602,14 +524,6 @@ def export_model_fbx_helper(report_func, model_obj, obj_config, output_dir, pref
             path_mode='COPY',
             batch_mode='OFF',
         )
-        
-        # UE模式：导出后恢复原始旋转
-        if prefs.target_engine == 'UE' and original_rotation is not None:
-            model_obj.rotation_euler = original_rotation
-            bpy.context.view_layer.update()
-            
-            if prefs.show_debug_info:
-                print(f"[批量对齐] UE模式：导出后恢复原始旋转")
         
         if prefs.show_debug_info:
             file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
@@ -650,25 +564,6 @@ def export_model_obj_helper(report_func, model_obj, obj_config, output_dir, pref
         
         if prefs.show_debug_info:
             print(f"[批量对齐] 选中对象: {model_obj.name} 及其 {len(model_obj.children_recursive)} 个子对象")
-        
-        # 移除所有材质中的法线贴图节点（避免错误的法线贴图导致显示问题）
-        for obj in [model_obj] + list(model_obj.children_recursive):
-            if obj.type == 'MESH' and obj.data.materials:
-                for mat_slot in obj.material_slots:
-                    if mat_slot.material and mat_slot.material.use_nodes:
-                        mat = mat_slot.material
-                        nodes_to_remove = []
-                        
-                        # 查找法线贴图节点
-                        for node in mat.node_tree.nodes:
-                            if node.type == 'NORMAL_MAP':
-                                nodes_to_remove.append(node)
-                        
-                        # 移除法线贴图节点
-                        for node in nodes_to_remove:
-                            if prefs.show_debug_info:
-                                print(f"[批量对齐] 移除法线贴图节点: {mat.name} -> {node.name}")
-                            mat.node_tree.nodes.remove(node)
         
         # 导出为OBJ格式
         bpy.ops.export_scene.obj(
@@ -889,20 +784,24 @@ class OBJECT_OT_batch_box_preview_export(Operator):
             
             for model_obj, ref_box, obj_config, file_format in model_box_pairs:
                 try:
-                    # 保存模型当前变换（和BOX一样的位置和缩放）
+                    # 保存模型当前变换（和BOX一样的位置、旋转和缩放）
                     original_position = model_obj.location.copy()
+                    original_rotation = model_obj.rotation_euler.copy()
                     original_scale = model_obj.scale.copy()
                     
-                    # 关键：导出前将模型position归零
+                    # 关键：导出前将模型position和rotation归零
                     if prefs.show_debug_info:
-                        print(f"[批量预览+导出] 导出前归零position: {model_obj.name}")
+                        print(f"[批量预览+导出] 导出前归零position和rotation: {model_obj.name}")
                         print(f"  当前位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
+                        print(f"  当前旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
                     
                     model_obj.location = Vector((0, 0, 0))
+                    model_obj.rotation_euler = (0, 0, 0)
                     bpy.context.view_layer.update()
                     
                     if prefs.show_debug_info:
                         print(f"  归零后位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
+                        print(f"  归零后旋转: X=0.0° Y=0.0° Z=0.0°")
                     
                     # 应用坐标系转换（针对目标引擎）
                     self.apply_coordinate_transform(
@@ -915,26 +814,28 @@ class OBJECT_OT_batch_box_preview_export(Operator):
                     # 导出模型
                     exported_path = self.export_model(model_obj, obj_config, output_dir, file_format, prefs)
                     
-                    # 导出后恢复模型位置和缩放（用于Blender预览对比）
+                    # 导出后恢复模型位置、旋转和缩放（用于Blender预览对比）
                     model_obj.location = original_position
+                    model_obj.rotation_euler = original_rotation
                     model_obj.scale = original_scale
                     bpy.context.view_layer.update()
                     
                     if prefs.show_debug_info:
                         print(f"[批量预览+导出] 导出后恢复变换: {model_obj.name}")
                         print(f"  恢复位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
+                        print(f"  恢复旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
                         print(f"  恢复缩放: X={model_obj.scale.x:.3f} Y={model_obj.scale.y:.3f} Z={model_obj.scale.z:.3f}")
                     
                     if exported_path:
-                        # 创建新的对象配置，rotation设为0，position保持原始值
+                        # 创建新的对象配置，rotation和position保持原始值
                         new_obj_config = obj_config.copy()
-                        new_obj_config['rotation'] = [0, 0, 0]
+                        # rotation保持原始值，不修改（模型已归零导出，在引擎中通过JSON的rotation还原）
                         # position保持原始值，不修改
                         
                         if prefs.show_debug_info:
                             print(f"[批量预览+导出] 输出JSON:")
                             print(f"  position: {new_obj_config.get('position')} (保持原始)")
-                            print(f"  rotation: [0, 0, 0] (已烘焙)")
+                            print(f"  rotation: {new_obj_config.get('rotation')} (保持原始，模型已归零导出)")
                             print(f"  scale: {new_obj_config.get('scale')} (保持原始)")
                         
                         # 更新URL字段
