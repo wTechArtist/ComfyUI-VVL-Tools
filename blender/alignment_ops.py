@@ -2,7 +2,6 @@ import bpy
 import bmesh
 import os
 import json
-import tempfile 
 
 from math import radians
 from mathutils import Vector, Matrix
@@ -220,15 +219,11 @@ def create_reference_box_with_position_helper(obj_config, prefs, report_func):
         # 设置缩放
         box.scale = scale
         
-        # 【关键修复】强制更新视图层，确保scale立即生效
-        bpy.context.view_layer.update()
-        
         if prefs.show_debug_info:
             print(f"[批量预览] 创建参考Box: {box.name}")
             print(f"  位置: {position} {'(UE模式已转换)' if prefs.target_engine == 'UE' else ''}")
             print(f"  旋转: {rotation}°")
             print(f"  缩放: {scale}")
-            print(f"  实际尺寸: X={box.dimensions.x:.3f} Y={box.dimensions.y:.3f} Z={box.dimensions.z:.3f}")  # 验证
         
         return box
         
@@ -285,16 +280,13 @@ def get_world_bbox_size(obj):
 
 
 def execute_perfect_align_batch_helper(ref_obj, target_obj, prefs):
-    """
-    批量模式的完美重合对齐（考虑旋转，按世界坐标系AABB匹配）
-    【完全复用Blender插件版本的算法】与model_alignment_tool完全一致
-    """
+    """批量模式的完美重合对齐（考虑旋转，按世界坐标系AABB匹配）"""
     if prefs.show_debug_info:
         print(f"[完美重合对齐] 开始处理:")
         print(f"  参考BOX: {ref_obj.name}")
         print(f"  目标模型: {target_obj.name}")
     
-    # 【使用世界AABB】获取世界坐标系下的真实AABB尺寸（考虑旋转）
+    # 获取世界坐标系下的真实AABB尺寸
     ref_world_size = get_world_bbox_size(ref_obj)
     target_world_size_before = get_world_bbox_size(target_obj)
     
@@ -313,16 +305,19 @@ def execute_perfect_align_batch_helper(ref_obj, target_obj, prefs):
     local_z_in_world = rot_matrix @ Vector((0, 0, 1))
     
     # 计算局部轴对世界AABB各轴的贡献（绝对值）
+    # 局部X轴对世界AABB的贡献
     local_x_contrib = Vector((
         abs(local_x_in_world.x),
         abs(local_x_in_world.y),
         abs(local_x_in_world.z)
     ))
+    # 局部Y轴对世界AABB的贡献
     local_y_contrib = Vector((
         abs(local_y_in_world.x),
         abs(local_y_in_world.y),
         abs(local_y_in_world.z)
     ))
+    # 局部Z轴对世界AABB的贡献
     local_z_contrib = Vector((
         abs(local_z_in_world.x),
         abs(local_z_in_world.y),
@@ -628,61 +623,6 @@ def export_model_fbx_helper(report_func, model_obj, obj_config, output_dir, pref
             import traceback
             traceback.print_exc()
         return None
-
-
-def apply_coordinate_transform_helper(model_obj, target_engine, export_format, prefs):
-    """
-    根据目标引擎应用坐标系转换
-    
-    Args:
-        model_obj: 模型对象
-        target_engine: 目标引擎 ('UE', 'UNITY', 'BLENDER', 'NONE')
-        export_format: 导出格式 ('.glb', '.gltf', '.fbx' 等)
-        prefs: 偏好设置对象
-    """
-    from mathutils import Vector
-    
-    if target_engine == 'NONE':
-        if prefs.show_debug_info:
-            print(f"[坐标转换] 无转换模式")
-        return
-    
-    elif target_engine == 'UE':
-        # GLB/GLTF格式跳过缩放（导出器自动处理）
-        if export_format and export_format.lower() in ['.glb', '.gltf', 'glb', 'gltf']:
-            if prefs.show_debug_info:
-                print(f"[坐标转换] UE模式 + GLB导出：跳过场景内缩放，导出阶段再处理")
-            return
-        
-        # FBX等其他格式需要缩放100倍（米→厘米）
-        UE_SCALE_FACTOR = 100.0
-        
-        if prefs.show_debug_info:
-            print(f"[坐标转换] UE模式：缩放系数 {UE_SCALE_FACTOR}")
-            print(f"[坐标转换] 转换前: scale={model_obj.scale}")
-        
-        current_scale = model_obj.scale.copy()
-        model_obj.scale = Vector((
-            current_scale.x * UE_SCALE_FACTOR,
-            current_scale.y * UE_SCALE_FACTOR,
-            current_scale.z * UE_SCALE_FACTOR
-        ))
-        
-        if prefs.show_debug_info:
-            print(f"[坐标转换] 转换后: scale={model_obj.scale}")
-    
-    elif target_engine == 'UNITY':
-        if prefs.show_debug_info:
-            print(f"[坐标转换] Unity模式")
-        # Unity转换在FBX导出时通过axis_forward和axis_up处理
-        pass
-    
-    elif target_engine == 'BLENDER':
-        if prefs.show_debug_info:
-            print(f"[坐标转换] Blender原生坐标系")
-        pass
-    
-    bpy.context.view_layer.update()
 
 
 def export_model_obj_helper(report_func, model_obj, obj_config, output_dir, prefs):
