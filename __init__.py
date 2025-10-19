@@ -57,7 +57,7 @@ NODE_CLASS_MAPPINGS = {
     # Tensor Preview节点 (1个)
     "TensorListPreview": TensorListPreview,
     
-    # JSON工具节点 (16个)
+    # JSON工具节点 (17个)
     "JsonObjectDeduplicator": JsonObjectDeduplicator,
     "JsonObjectMerger": JsonObjectMerger,
     "JsonExtractSubjectNamesScales": JsonExtractSubjectNamesScales,
@@ -74,6 +74,7 @@ NODE_CLASS_MAPPINGS = {
     "JsonObjectOutputUrlCheck": JsonObjectOutputUrlCheck,
     "JsonFieldRenamer": JsonFieldRenamer,
     "JsonFieldDeleter": JsonFieldDeleter,
+    "JsonArrayFieldUniformSetter": JsonArrayFieldUniformSetter,
     
     # Room Generator节点 (1个)
     "RoomBboxGeneratorNode": RoomBboxGeneratorNode,
@@ -132,6 +133,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "JsonObjectOutputUrlCheck": "VVL JSON Object Output URL Check",
     "JsonFieldRenamer": "VVL JSON Field Renamer",
     "JsonFieldDeleter": "VVL JSON Field Deleter",
+    "JsonArrayFieldUniformSetter": "VVL JSON Array Field Uniform Setter",
     # Room Generator节点
     "RoomBboxGeneratorNode": "VVL 3D Room Box Json Generator",
     
@@ -146,7 +148,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 
 print("------------------------------------------")    
-print("\033[34mVVL Tools: \033[92m 33 Nodes Loaded\033[0m")
+print("\033[34mVVL Tools: \033[92m 34 Nodes Loaded\033[0m")
 print("------------------------------------------") 
 
 # 导出给ComfyUI

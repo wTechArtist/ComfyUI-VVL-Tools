@@ -2381,6 +2381,219 @@ class JsonFieldDeleter:
             return (json.dumps({"error": error_msg}, ensure_ascii=False),)
 
 
+class JsonArrayFieldUniformSetter:
+    """
+    JSON数组字段统一值设置节点
+    
+    将JSON中objects数组所有对象的指定数组字段的元素统一设置为相同值：
+    • 将数组所有元素设置为同一个值（如 [1,2,3] → [5,5,5]）
+    • 支持简单字段和嵌套字段
+    • 批量处理所有对象
+    • 提供详细的处理统计
+    
+    🎯 功能特性：
+    • 统一设置：将数组中所有元素设置为相同值
+    • 路径支持：支持点号分隔的嵌套路径
+    • 类型安全：自动验证字段是否为数组
+    • 批量操作：一次性处理所有对象
+    
+    📝 使用场景：
+    • 统一设置scale值：[1.5, 2.0, 1.2] → [1.0, 1.0, 1.0]
+    • 重置rotation值：[45, 90, 0] → [0, 0, 0]
+    • 批量修正错误的数组值
+    • 统一数组元素的值
+    
+    💡 处理逻辑：
+    1. 遍历objects数组中的每个对象
+    2. 找到指定字段（必须是数组类型）
+    3. 将数组中所有元素替换为新值
+    4. 跳过非数组类型的字段
+    5. 保持其他字段不变
+    
+    🔍 注意事项：
+    • 字段必须是数组类型
+    • 非数组字段会被跳过
+    • 保持数组长度不变
+    • 新值必须是有效的数字
+    
+    📊 使用示例：
+    
+    示例1 - 统一设置scale：
+    字段路径: "scale"
+    新值: 1.0
+    
+    替换前: {"name": "chair", "scale": [1.5, 2.0, 1.2]}
+    替换后: {"name": "chair", "scale": [1.0, 1.0, 1.0]}
+    
+    示例2 - 重置rotation为0：
+    字段路径: "rotation"
+    新值: 0.0
+    
+    替换前: {"name": "chair", "rotation": [45, 90, 30]}
+    替换后: {"name": "chair", "rotation": [0, 0, 0]}
+    
+    示例3 - 统一position值：
+    字段路径: "position"
+    新值: 5.0
+    
+    替换前: {"name": "table", "position": [10, 20, 30]}
+    替换后: {"name": "table", "position": [5.0, 5.0, 5.0]}
+    """
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "json_text": (IO.STRING, {"multiline": True, "default": "", "tooltip": "包含objects数组的JSON数据\n将统一设置所有对象的指定数组字段值"}),
+                "field_path": (IO.STRING, {"default": "scale", "tooltip": "要处理的数组字段路径\n• 简单字段: scale, rotation, position\n• 嵌套字段: transform.scale, data.values\n字段必须是数组类型"}),
+                "new_value": (IO.FLOAT, {"default": 1.0, "min": -999999.0, "max": 999999.0, "step": 0.001, "tooltip": "新的数值\n数组中的所有元素将被设置为此值\n示例: 1.0, 0.0, 2.5"}),
+            }
+        }
+    
+    RETURN_TYPES = (IO.STRING,)
+    RETURN_NAMES = ("processed_json",)
+    FUNCTION = "set_array_uniform_value"
+    CATEGORY = "VVL/json"
+    
+    def _get_nested_field(self, obj, field_path):
+        """获取嵌套字段的值"""
+        if not isinstance(obj, dict):
+            return None
+        
+        if '.' not in field_path:
+            return obj.get(field_path)
+        
+        path_parts = field_path.split('.')
+        current = obj
+        
+        for part in path_parts:
+            if not isinstance(current, dict) or part not in current:
+                return None
+            current = current[part]
+        
+        return current
+    
+    def _set_nested_field(self, obj, field_path, value):
+        """设置嵌套字段的值"""
+        if not isinstance(obj, dict):
+            return False
+        
+        if '.' not in field_path:
+            obj[field_path] = value
+            return True
+        
+        path_parts = field_path.split('.')
+        current = obj
+        
+        for part in path_parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            elif not isinstance(current[part], dict):
+                return False
+            current = current[part]
+        
+        final_key = path_parts[-1]
+        current[final_key] = value
+        return True
+    
+    def set_array_uniform_value(self, json_text, field_path="scale", new_value=1.0, **kwargs):
+        """将数组字段的所有元素统一设置为指定值"""
+        try:
+            # 解析输入JSON
+            data = json.loads(json_text)
+            
+            # 检查是否有objects字段
+            if 'objects' not in data or not isinstance(data['objects'], list):
+                print("JsonArrayFieldUniformSetter: 未找到有效的objects数组")
+                return (json_text,)
+            
+            objects = data['objects']
+            
+            if len(objects) == 0:
+                print("JsonArrayFieldUniformSetter: objects数组为空")
+                return (json_text,)
+            
+            # 验证字段路径
+            if not field_path or not field_path.strip():
+                print("JsonArrayFieldUniformSetter: 字段路径为空")
+                return (json_text,)
+            
+            field_path = field_path.strip()
+            
+            # 统计处理结果
+            success_count = 0
+            skipped_not_array = 0
+            skipped_no_field = 0
+            total_elements_replaced = 0
+            
+            # 遍历所有对象
+            for i, obj in enumerate(objects):
+                if not isinstance(obj, dict):
+                    skipped_no_field += 1
+                    continue
+                
+                # 获取字段值
+                field_value = self._get_nested_field(obj, field_path)
+                
+                # 检查字段是否存在
+                if field_value is None:
+                    skipped_no_field += 1
+                    continue
+                
+                # 检查字段是否为数组
+                if not isinstance(field_value, list):
+                    skipped_not_array += 1
+                    continue
+                
+                # 检查数组是否为空
+                if len(field_value) == 0:
+                    skipped_not_array += 1
+                    continue
+                
+                # 创建新数组，将所有元素设置为新值
+                new_array = [new_value] * len(field_value)
+                elements_replaced = len(new_array)
+                
+                # 设置新数组
+                if self._set_nested_field(obj, field_path, new_array):
+                    success_count += 1
+                    total_elements_replaced += elements_replaced
+            
+            # 生成处理后的JSON
+            processed_json = json.dumps(data, ensure_ascii=False, indent=2)
+            
+            # 输出处理统计信息
+            print(f"JsonArrayFieldUniformSetter 处理完成:")
+            print(f"  • 字段路径: '{field_path}'")
+            print(f"  • 新值: {new_value}")
+            print(f"  • 总对象数: {len(objects)}")
+            print(f"  • 成功处理: {success_count} 个对象")
+            print(f"  • 总共替换: {total_elements_replaced} 个数组元素")
+            
+            if skipped_no_field > 0:
+                print(f"  • 跳过（字段不存在）: {skipped_no_field} 个")
+            if skipped_not_array > 0:
+                print(f"  • 跳过（非数组或空数组）: {skipped_not_array} 个")
+            
+            # 计算成功率
+            if len(objects) > 0:
+                success_rate = (success_count / len(objects)) * 100
+                print(f"  • 处理成功率: {success_rate:.1f}%")
+            
+            return (processed_json,)
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON解析错误: {str(e)}"
+            print(f"JsonArrayFieldUniformSetter error: {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+        except Exception as e:
+            error_msg = f"设置数组字段值时出错: {str(e)}"
+            print(f"JsonArrayFieldUniformSetter error: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+
+
 class IndexOffsetAdjuster:
     """
     索引偏移调整器
@@ -2561,7 +2774,8 @@ NODE_CLASS_MAPPINGS = {
     "IndexOffsetAdjuster": IndexOffsetAdjuster,
     "JsonObjectOutputUrlCheck": JsonObjectOutputUrlCheck,
     "JsonFieldRenamer": JsonFieldRenamer,
-    "JsonFieldDeleter": JsonFieldDeleter
+    "JsonFieldDeleter": JsonFieldDeleter,
+    "JsonArrayFieldUniformSetter": JsonArrayFieldUniformSetter
 }
 
 # Node display name mappings
@@ -2581,5 +2795,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IndexOffsetAdjuster": "VVL Index Offset Adjuster",
     "JsonObjectOutputUrlCheck": "VVL JSON Object Output URL Check",
     "JsonFieldRenamer": "VVL JSON Field Renamer",
-    "JsonFieldDeleter": "VVL JSON Field Deleter"
+    "JsonFieldDeleter": "VVL JSON Field Deleter",
+    "JsonArrayFieldUniformSetter": "VVL JSON Array Field Uniform Setter"
 }
