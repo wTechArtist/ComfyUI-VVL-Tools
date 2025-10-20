@@ -172,7 +172,24 @@ def apply_transform_to_model_helper(model_obj, obj_config, prefs, report_func):
     try:
         # 应用rotation
         rotation = obj_config.get('rotation', [0, 0, 0])
-        model_obj.rotation_euler = [r * 3.14159 / 180 for r in rotation]
+        rotation_rad = [r * 3.14159 / 180 for r in rotation]
+        
+        # 根据对象的旋转模式正确设置旋转
+        if model_obj.rotation_mode == 'QUATERNION':
+            # 四元数模式：先转换为四元数
+            from mathutils import Euler
+            euler = Euler(rotation_rad, 'XYZ')
+            model_obj.rotation_quaternion = euler.to_quaternion()
+        elif 'AXIS_ANGLE' in model_obj.rotation_mode:
+            # 轴角模式：转换为轴角
+            from mathutils import Euler
+            euler = Euler(rotation_rad, 'XYZ')
+            quat = euler.to_quaternion()
+            axis, angle = quat.to_axis_angle()
+            model_obj.rotation_axis_angle = [angle, axis.x, axis.y, axis.z]
+        else:
+            # 欧拉角模式：直接设置
+            model_obj.rotation_euler = rotation_rad
         
         # 应用position（所有模式）
         position = obj_config.get('position', [0, 0, 0])
@@ -786,17 +803,42 @@ class OBJECT_OT_batch_box_preview_export(Operator):
                 try:
                     # 保存模型当前变换（和BOX一样的位置、旋转和缩放）
                     original_position = model_obj.location.copy()
-                    original_rotation = model_obj.rotation_euler.copy()
                     original_scale = model_obj.scale.copy()
+                    
+                    # 保存旋转（根据模式）
+                    original_rotation_quat = None
+                    original_rotation_axis_angle = None
+                    original_rotation = None
+                    
+                    if model_obj.rotation_mode == 'QUATERNION':
+                        original_rotation_quat = model_obj.rotation_quaternion.copy()
+                    elif 'AXIS_ANGLE' in model_obj.rotation_mode:
+                        original_rotation_axis_angle = model_obj.rotation_axis_angle[:]
+                    else:
+                        original_rotation = model_obj.rotation_euler.copy()
                     
                     # 关键：导出前将模型position和rotation归零
                     if prefs.show_debug_info:
                         print(f"[批量预览+导出] 导出前归零position和rotation: {model_obj.name}")
                         print(f"  当前位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
-                        print(f"  当前旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
+                        
+                        # 根据旋转模式显示当前旋转
+                        if model_obj.rotation_mode == 'QUATERNION':
+                            euler = model_obj.rotation_quaternion.to_euler()
+                            print(f"  当前旋转(从四元数): X={euler.x*180/3.14159:.1f}° Y={euler.y*180/3.14159:.1f}° Z={euler.z*180/3.14159:.1f}°")
+                        else:
+                            print(f"  当前旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
                     
                     model_obj.location = Vector((0, 0, 0))
-                    model_obj.rotation_euler = (0, 0, 0)
+                    
+                    # 根据旋转模式正确归零旋转
+                    if model_obj.rotation_mode == 'QUATERNION':
+                        model_obj.rotation_quaternion = (1, 0, 0, 0)
+                    elif 'AXIS_ANGLE' in model_obj.rotation_mode:
+                        model_obj.rotation_axis_angle = [0, 0, 0, 1]  # angle=0, axis=[0,0,1]
+                    else:
+                        model_obj.rotation_euler = (0, 0, 0)
+                    
                     bpy.context.view_layer.update()
                     
                     if prefs.show_debug_info:
@@ -816,14 +858,29 @@ class OBJECT_OT_batch_box_preview_export(Operator):
                     
                     # 导出后恢复模型位置、旋转和缩放（用于Blender预览对比）
                     model_obj.location = original_position
-                    model_obj.rotation_euler = original_rotation
                     model_obj.scale = original_scale
+                    
+                    # 恢复旋转（根据模式）
+                    if model_obj.rotation_mode == 'QUATERNION' and original_rotation_quat:
+                        model_obj.rotation_quaternion = original_rotation_quat
+                    elif 'AXIS_ANGLE' in model_obj.rotation_mode and original_rotation_axis_angle:
+                        model_obj.rotation_axis_angle = original_rotation_axis_angle
+                    elif original_rotation:
+                        model_obj.rotation_euler = original_rotation
+                    
                     bpy.context.view_layer.update()
                     
                     if prefs.show_debug_info:
                         print(f"[批量预览+导出] 导出后恢复变换: {model_obj.name}")
                         print(f"  恢复位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
-                        print(f"  恢复旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
+                        
+                        # 根据旋转模式显示恢复后的旋转
+                        if model_obj.rotation_mode == 'QUATERNION':
+                            euler = model_obj.rotation_quaternion.to_euler()
+                            print(f"  恢复旋转(从四元数): X={euler.x*180/3.14159:.1f}° Y={euler.y*180/3.14159:.1f}° Z={euler.z*180/3.14159:.1f}°")
+                        else:
+                            print(f"  恢复旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
+                        
                         print(f"  恢复缩放: X={model_obj.scale.x:.3f} Y={model_obj.scale.y:.3f} Z={model_obj.scale.z:.3f}")
                     
                     if exported_path:
