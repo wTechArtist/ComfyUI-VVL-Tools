@@ -113,16 +113,14 @@ class FakeAddonPreferences:
     - batch_json_config: 输入的 JSON 配置（批量对齐的场景数据）
     - batch_output_json: 输出的 JSON 配置（处理后的场景数据）
     - show_debug_info: 是否显示调试信息（始终为 True，确保完整日志）
-    - processing_mode: 处理模式（STREAM/BATCH）
     """
-    def __init__(self, target_engine, export_format, output_dir, processing_mode='STREAM'):
+    def __init__(self, target_engine, export_format, output_dir):
         self.target_engine = target_engine
         self.export_format = export_format
         self.batch_output_dir = output_dir
         self.batch_json_config = ""
         self.batch_output_json = ""
         self.show_debug_info = True  # 始终开启调试信息
-        self.processing_mode = processing_mode  # 处理模式：STREAM（流式处理，推荐）或 BATCH（一次性处理）
 
 class FakeAddon:
     """
@@ -265,17 +263,16 @@ def main():
     
     argv = sys.argv[sys.argv.index("--") + 1:]
     
-    if len(argv) < 6:
+    if len(argv) < 5:
         print("错误: 参数不足")
-        print("用法: blender --background --python alignment_script.py -- <input_json> <output_dir> <export_format> <target_engine> <processing_mode> <output_json>")
+        print("用法: blender --background --python alignment_script.py -- <input_json> <output_dir> <export_format> <target_engine> <output_json>")
         sys.exit(1)
     
     input_json_path = argv[0]
     output_dir = argv[1]
     export_format = argv[2]  # 'GLB' 或 'FBX'
     target_engine = argv[3]  # 'UE', 'UNITY', 'BLENDER', 'NONE'
-    processing_mode = argv[4]  # 'STREAM' 或 'BATCH'
-    output_json_path = argv[5]
+    output_json_path = argv[4]
     
     # 创建日志文件（基于时间戳）
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -295,7 +292,6 @@ def main():
     logger.log(f"  输出目录: {output_dir}")
     logger.log(f"  导出格式: {export_format}")
     logger.log(f"  目标引擎: {target_engine}")
-    logger.log(f"  处理模式: {processing_mode}")
     logger.log(f"  日志文件: {log_path}")
     logger.log(f"  执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.log(f"  重定向输出: 已启用（捕获所有print）")
@@ -318,8 +314,7 @@ def main():
     addon_prefs = FakeAddonPreferences(
         target_engine=target_engine,
         export_format=export_format,
-        output_dir=output_dir,
-        processing_mode=processing_mode  # 使用命令行传入的处理模式
+        output_dir=output_dir
     )
     
     # 设置JSON配置（通过偏好设置传递给操作符）
@@ -329,7 +324,6 @@ def main():
     logger.log(f"  target_engine: {addon_prefs.target_engine}")
     logger.log(f"  export_format: {addon_prefs.export_format}")
     logger.log(f"  batch_output_dir: {addon_prefs.batch_output_dir}")
-    logger.log(f"  processing_mode: {addon_prefs.processing_mode}")
     logger.log(f"  show_debug_info: {addon_prefs.show_debug_info}\n")
     
     # 创建假的context对象

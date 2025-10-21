@@ -51,39 +51,6 @@ def get_bbox_directions_static(obj):
 
 # ==================== 批量预览共用函数 ====================
 
-def format_elapsed_time(elapsed_time):
-    """格式化耗时为易读的字符串"""
-    hours = int(elapsed_time // 3600)
-    minutes = int((elapsed_time % 3600) // 60)
-    seconds = elapsed_time % 60
-    
-    if hours > 0:
-        return f"{hours}小时{minutes}分钟{seconds:.2f}秒"
-    elif minutes > 0:
-        return f"{minutes}分钟{seconds:.2f}秒"
-    else:
-        return f"{seconds:.2f}秒"
-
-
-def print_processing_summary(prefs, operation_name, success_count, failed_count, exported_count, elapsed_time, processing_mode=None):
-    """打印处理完成统计信息"""
-    time_str = format_elapsed_time(elapsed_time)
-    
-    if prefs.show_debug_info:
-        print(f"\n{'='*80}")
-        print(f"[{operation_name}] 处理完成统计:")
-        if processing_mode:
-            print(f"  处理模式: {processing_mode}")
-        print(f"  成功: {success_count} 个")
-        print(f"  失败: {failed_count} 个")
-        if exported_count >= 0:
-            print(f"  导出: {exported_count} 个")
-        print(f"  总耗时: {time_str} ({elapsed_time:.2f}秒)")
-        print(f"{'='*80}\n")
-    
-    return time_str
-
-
 def download_and_import_model_helper(obj_config, auth_token, prefs, report_func):
     """下载并导入模型的辅助函数"""
     try:
@@ -480,194 +447,8 @@ def execute_perfect_align_batch_helper(ref_obj, target_obj, prefs):
     bpy.context.view_layer.update()
 
 
-def sanitize_materials_for_export(obj, prefs):
-    """清理材质节点以避免导出时的贴图问题（增强版：处理超大纹理、损坏贴图）"""
-    try:
-        cleaned_count = 0
-        removed_count = 0
-        downscaled_count = 0
-        
-        # 贴图尺寸安全阈值（像素）
-        MAX_SAFE_TEXTURE_SIZE = 1024  # 超过4K认为是超大纹理
-        MAX_TEXTURE_PIXELS = 1048576  # 1024x1024 = 1M像素
-        
-        # 遍历对象及其子对象的所有材质
-        all_objects = [obj] + list(obj.children_recursive)
-        
-        for current_obj in all_objects:
-            if not hasattr(current_obj, 'material_slots'):
-                continue
-                
-            for mat_slot in current_obj.material_slots:
-                if not mat_slot.material:
-                    continue
-                    
-                mat = mat_slot.material
-                if not mat.use_nodes:
-                    continue
-                
-                # 检查材质节点树中的图像纹理节点
-                nodes_to_remove = []
-                
-                for node in mat.node_tree.nodes:
-                    if node.type != 'TEX_IMAGE' or not node.image:
-                        continue
-                    
-                    image = node.image
-                    should_remove = False
-                    should_downscale = False
-                    
-                    # === 1. 检查文件路径问题 ===
-                    if image.filepath and not os.path.exists(bpy.path.abspath(image.filepath)):
-                        if prefs.show_debug_info:
-                            print(f"[材质清理] 发现缺失贴图: {image.name} -> {image.filepath}")
-                        # 尝试移除路径引用，避免导出器访问不存在的文件
-                        should_remove = True
-                        cleaned_count += 1
-                    
-                    # === 2. 检查贴图尺寸 ===
-                    try:
-                        width = image.size[0]
-                        height = image.size[1]
-                        total_pixels = width * height
-                        
-                        if width > MAX_SAFE_TEXTURE_SIZE or height > MAX_SAFE_TEXTURE_SIZE or total_pixels > MAX_TEXTURE_PIXELS:
-                            if prefs.show_debug_info:
-                                print(f"[材质清理] 发现超大纹理: {image.name} ({width}x{height}, {total_pixels/1000000:.1f}M像素)")
-                            
-                            # 尝试降级处理
-                            should_downscale = True
-                    except Exception as size_error:
-                        if prefs.show_debug_info:
-                            print(f"[材质清理] 无法读取贴图尺寸: {image.name} -> {str(size_error)}")
-                        # 无法读取尺寸的贴图可能已损坏
-                        should_remove = True
-                        cleaned_count += 1
-                    
-                    # === 3. 检查贴图格式和通道数 ===
-                    try:
-                        # 检查是否为高风险格式（EXR、TIFF 16位、S3TC压缩等）
-                        if image.file_format in ['OPEN_EXR', 'OPEN_EXR_MULTILAYER', 'HDR']:
-                            if prefs.show_debug_info:
-                                print(f"[材质清理] 发现高风险格式贴图: {image.name} (格式: {image.file_format})")
-                            # HDR/EXR格式容易触发OpenImageIO崩溃
-                            should_downscale = True
-                        
-                        # 检查是否为空贴图
-                        if image.pixels is None or len(image.pixels) == 0:
-                            if prefs.show_debug_info:
-                                print(f"[材质清理] 发现空贴图: {image.name}")
-                            should_remove = True
-                            cleaned_count += 1
-                    except Exception as format_error:
-                        if prefs.show_debug_info:
-                            print(f"[材质清理] 检查贴图格式失败: {image.name} -> {str(format_error)}")
-                        should_remove = True
-                        cleaned_count += 1
-                    
-                    # === 4. 执行降级处理 ===
-                    if should_downscale and not should_remove:
-                        try:
-                            # 创建降级版本（缩小到安全尺寸）
-                            original_width = image.size[0]
-                            original_height = image.size[1]
-                            
-                            # 计算安全缩放比例
-                            scale_factor = min(
-                                MAX_SAFE_TEXTURE_SIZE / original_width,
-                                MAX_SAFE_TEXTURE_SIZE / original_height,
-                                1.0  # 不放大
-                            )
-                            
-                            if scale_factor < 1.0:
-                                new_width = int(original_width * scale_factor)
-                                new_height = int(original_height * scale_factor)
-                                
-                                if prefs.show_debug_info:
-                                    print(f"[材质清理] 降级纹理: {image.name} {original_width}x{original_height} -> {new_width}x{new_height}")
-                                
-                                # 创建新的降级图像
-                                downscaled_image = image.copy()
-                                downscaled_image.name = f"{image.name}_safe"
-                                downscaled_image.scale(new_width, new_height)
-                                
-                                # 转换为PNG格式（最安全）
-                                downscaled_image.file_format = 'PNG'
-                                
-                                # 打包到blend文件中
-                                downscaled_image.pack()
-                                
-                                # 替换节点中的图像引用
-                                node.image = downscaled_image
-                                
-                                downscaled_count += 1
-                                
-                                if prefs.show_debug_info:
-                                    print(f"[材质清理] 已替换为降级版本: {downscaled_image.name}")
-                            else:
-                                # 尺寸在安全范围内，但格式不安全，尝试转换格式
-                                if image.file_format != 'PNG':
-                                    image.file_format = 'PNG'
-                                    if prefs.show_debug_info:
-                                        print(f"[材质清理] 转换格式为PNG: {image.name}")
-                                
-                                # 打包图像
-                                if not image.packed_file:
-                                    image.pack()
-                                    if prefs.show_debug_info:
-                                        print(f"[材质清理] 已打包贴图: {image.name}")
-                        
-                        except Exception as downscale_error:
-                            if prefs.show_debug_info:
-                                print(f"[材质清理] 降级失败，将移除节点: {image.name} -> {str(downscale_error)}")
-                            should_remove = True
-                    
-                    # === 5. 移除有问题的节点 ===
-                    if should_remove:
-                        nodes_to_remove.append(node)
-                        if prefs.show_debug_info:
-                            print(f"[材质清理] 标记移除节点: {node.name} (贴图: {image.name})")
-                    
-                    # === 6. 安全打包（未降级且未移除的正常贴图） ===
-                    elif not should_downscale:
-                        if not image.packed_file and image.filepath:
-                            try:
-                                # 尝试打包图像以避免路径问题
-                                image.pack()
-                                if prefs.show_debug_info:
-                                    print(f"[材质清理] 已打包贴图: {image.name}")
-                            except Exception as pack_error:
-                                if prefs.show_debug_info:
-                                    print(f"[材质清理] 打包失败，将移除节点: {image.name} -> {str(pack_error)}")
-                                nodes_to_remove.append(node)
-                
-                # 移除标记的节点
-                for node in nodes_to_remove:
-                    try:
-                        mat.node_tree.nodes.remove(node)
-                        removed_count += 1
-                        if prefs.show_debug_info:
-                            print(f"[材质清理] 已移除问题节点: {node.name}")
-                    except Exception as remove_error:
-                        if prefs.show_debug_info:
-                            print(f"[材质清理] 移除节点失败: {node.name} -> {str(remove_error)}")
-        
-        # 输出统计信息
-        if prefs.show_debug_info:
-            print(f"[材质清理] 清理完成:")
-            print(f"  - 发现问题贴图: {cleaned_count} 个")
-            print(f"  - 降级纹理: {downscaled_count} 个")
-            print(f"  - 移除节点: {removed_count} 个")
-        
-    except Exception as e:
-        if prefs.show_debug_info:
-            print(f"[材质清理] 清理过程出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
-
-
 def export_model_glb_helper(report_func, model_obj, obj_config, output_dir, prefs):
-    """导出模型为GLB格式，贴图嵌入（优化参数避免OpenImageIO崩溃）"""
+    """导出模型为GLB格式，贴图嵌入"""
     try:
         model_name = obj_config.get('name', 'model')
         # 清理文件名，移除不合法字符
@@ -679,9 +460,6 @@ def export_model_glb_helper(report_func, model_obj, obj_config, output_dir, pref
         if prefs.show_debug_info:
             print(f"[批量对齐] 准备导出GLB: {model_name} -> {output_path}")
             print(f"[批量对齐] 目标引擎检查: target_engine = '{prefs.target_engine}'")
-        
-        # ★ 导出前清理材质，避免贴图问题
-        sanitize_materials_for_export(model_obj, prefs)
         
         # 取消所有选择
         bpy.ops.object.select_all(action='DESELECT')
@@ -696,90 +474,22 @@ def export_model_glb_helper(report_func, model_obj, obj_config, output_dir, pref
         if prefs.show_debug_info:
             print(f"[批量对齐] 选中对象: {model_obj.name} 及其 {len(model_obj.children_recursive)} 个子对象")
         
-        # 导出为GLB格式（优化参数以避免OpenImageIO崩溃）
-        try:
-            bpy.ops.export_scene.gltf(
-                filepath=output_path,
-                export_format='GLB',
-                use_selection=True,
-                export_texcoords=True,
-                export_normals=True,
-                export_materials='EXPORT',
-                export_animations=False,
-                # ★ 关键优化：强制转换贴图为PNG，避免OpenImageIO读取原始格式时崩溃
-                export_image_format='PNG',
-                export_keep_originals=False,
-                # ★ 嵌入贴图到GLB
-                export_texture_dir='',
-                # ★ 压缩优化
-                export_draco_mesh_compression_enable=False,  # 禁用Draco压缩，避免额外的兼容性问题
-                # ★ 其他安全选项
-                export_yup=True,
-                check_existing=False,
-            )
-            
-            if prefs.show_debug_info:
-                file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                print(f"[批量对齐] GLB导出完成: {output_path} ({file_size_mb:.2f} MB)")
-            
-            return output_path
-            
-        except Exception as export_error:
-            # 如果PNG导出失败，尝试使用JPEG作为备选方案
-            if prefs.show_debug_info:
-                print(f"[批量对齐] PNG导出失败，尝试JPEG格式...")
-            
-            try:
-                bpy.ops.export_scene.gltf(
-                    filepath=output_path,
-                    export_format='GLB',
-                    use_selection=True,
-                    export_texcoords=True,
-                    export_normals=True,
-                    export_materials='EXPORT',
-                    export_animations=False,
-                    export_image_format='JPEG',  # 备选：JPEG
-                    export_keep_originals=False,
-                    export_texture_dir='',
-                    export_draco_mesh_compression_enable=False,
-                    export_yup=True,
-                    check_existing=False,
-                )
-                
-                if prefs.show_debug_info:
-                    file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                    print(f"[批量对齐] GLB导出完成（JPEG格式）: {output_path} ({file_size_mb:.2f} MB)")
-                
-                return output_path
-                
-            except Exception as jpeg_error:
-                # 如果JPEG也失败，尝试不导出贴图
-                if prefs.show_debug_info:
-                    print(f"[批量对齐] JPEG导出也失败，尝试不导出材质...")
-                
-                try:
-                    bpy.ops.export_scene.gltf(
-                        filepath=output_path,
-                        export_format='GLB',
-                        use_selection=True,
-                        export_texcoords=True,
-                        export_normals=True,
-                        export_materials='PLACEHOLDER',  # 仅导出占位符材质
-                        export_animations=False,
-                        export_draco_mesh_compression_enable=False,
-                        export_yup=True,
-                        check_existing=False,
-                    )
-                    
-                    if prefs.show_debug_info:
-                        file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                        print(f"[批量对齐] GLB导出完成（无材质）: {output_path} ({file_size_mb:.2f} MB)")
-                        print(f"[批量对齐] ⚠ 警告：由于贴图问题，该模型仅包含几何体")
-                    
-                    return output_path
-                    
-                except Exception as final_error:
-                    raise final_error
+        # 导出为GLB格式
+        bpy.ops.export_scene.gltf(
+            filepath=output_path,
+            export_format='GLB',
+            use_selection=True,
+            export_texcoords=True,
+            export_normals=True,
+            export_materials='EXPORT',
+            export_image_format='AUTO',
+        )
+        
+        if prefs.show_debug_info:
+            file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"[批量对齐] GLB导出完成: {output_path} ({file_size_mb:.2f} MB)")
+        
+        return output_path
     
     except Exception as e:
         report_func({'WARNING'}, f"导出GLB失败: {str(e)}")
@@ -913,9 +623,6 @@ class OBJECT_OT_batch_box_preview(Operator):
     )
     
     def execute(self, context):
-        import time
-        start_time = time.time()  # 记录开始时间
-        
         try:
             # 获取插件偏好设置
             prefs = context.preferences.addons[get_addon_name()].preferences
@@ -981,13 +688,7 @@ class OBJECT_OT_batch_box_preview(Operator):
                         import traceback
                         traceback.print_exc()
             
-            # 计算并输出总耗时
-            elapsed_time = time.time() - start_time
-            time_str = print_processing_summary(prefs, "批量预览", success_count, failed_count, -1, elapsed_time)
-            
             self.report({'INFO'}, f"批量预览完成: 成功 {success_count} 个, 失败 {failed_count} 个")
-            self.report({'INFO'}, f"总耗时: {time_str}")
-            
             return {'FINISHED'}
             
         except Exception as e:
@@ -1011,13 +712,7 @@ class OBJECT_OT_batch_box_preview_export(Operator):
     )
     
     def execute(self, context):
-        import time
-        start_time = time.time()  # 记录开始时间
-        
         try:
-            # 显式启用 glTF 和 FBX 导入/导出插件
-            self.ensure_importers_enabled()
-            
             # 获取插件偏好设置
             prefs = context.preferences.addons[get_addon_name()].preferences
             
@@ -1054,24 +749,174 @@ class OBJECT_OT_batch_box_preview_export(Operator):
                     return {'CANCELLED'}
             
             self.report({'INFO'}, f"开始批量预览+导出处理 {len(objects)} 个对象...")
-            if prefs.show_debug_info:
-                print(f"[批量预览+导出] 处理模式: {prefs.processing_mode}")
             
             success_count = 0
             failed_count = 0
             processed_objects = []
+            model_box_pairs = []  # 存储(模型, BOX, 配置, 导出格式)
             
-            # 根据处理模式选择不同的执行路径
-            if prefs.processing_mode == 'STREAM':
-                # 流式处理：逐个处理并导出
-                success_count, failed_count, processed_objects = self.execute_stream_mode(
-                    context, objects, auth_token, output_dir, prefs
-                )
-            else:
-                # 一次性处理：保持原有逻辑
-                success_count, failed_count, processed_objects = self.execute_batch_mode(
-                    context, objects, auth_token, output_dir, prefs
-                )
+            for idx, obj_config in enumerate(objects):
+                try:
+                    self.report({'INFO'}, f"处理第 {idx+1}/{len(objects)} 个对象: {obj_config.get('name', '未命名')}")
+                    
+                    # 下载并导入模型
+                    model_obj, file_format = download_and_import_model_helper(obj_config, auth_token, prefs, self.report)
+                    if not model_obj:
+                        failed_count += 1
+                        continue
+                    
+                    # 应用JSON中的rotation和position到模型
+                    apply_transform_to_model_helper(model_obj, obj_config, prefs, self.report)
+                    
+                    # 创建带position的参考Box
+                    ref_box = create_reference_box_with_position_helper(obj_config, prefs, self.report)
+                    if not ref_box:
+                        failed_count += 1
+                        continue
+                    
+                    # 执行完美重合对齐
+                    align_model_to_box_preview_helper(model_obj, ref_box, context, prefs, self.report)
+                    
+                    # 保留Box，不删除
+                    if prefs.show_debug_info:
+                        print(f"[批量预览+导出] ✓ 保留BOX: {ref_box.name}")
+                    
+                    # 使用用户设置的导出格式
+                    export_format = '.glb' if prefs.export_format == 'GLB' else '.fbx'
+                    
+                    # 存储模型、BOX、配置和导出格式
+                    model_box_pairs.append((model_obj, ref_box, obj_config, export_format))
+                    success_count += 1
+                    
+                except Exception as e:
+                    self.report({'WARNING'}, f"处理对象 {idx+1} 失败: {str(e)}")
+                    failed_count += 1
+                    if prefs.show_debug_info:
+                        import traceback
+                        traceback.print_exc()
+            
+            # 导出所有成功处理的模型
+            format_name = 'GLB' if prefs.export_format == 'GLB' else 'FBX'
+            self.report({'INFO'}, f"开始导出 {len(model_box_pairs)} 个模型（格式：{format_name}）...")
+            
+            for model_obj, ref_box, obj_config, file_format in model_box_pairs:
+                try:
+                    # 保存模型当前变换（和BOX一样的位置、旋转和缩放）
+                    original_position = model_obj.location.copy()
+                    original_scale = model_obj.scale.copy()
+                    
+                    # 保存旋转（根据模式）
+                    original_rotation_quat = None
+                    original_rotation_axis_angle = None
+                    original_rotation = None
+                    
+                    if model_obj.rotation_mode == 'QUATERNION':
+                        original_rotation_quat = model_obj.rotation_quaternion.copy()
+                    elif 'AXIS_ANGLE' in model_obj.rotation_mode:
+                        original_rotation_axis_angle = model_obj.rotation_axis_angle[:]
+                    else:
+                        original_rotation = model_obj.rotation_euler.copy()
+                    
+                    # 关键：导出前将模型position和rotation归零
+                    if prefs.show_debug_info:
+                        print(f"[批量预览+导出] 导出前归零position和rotation: {model_obj.name}")
+                        print(f"  当前位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
+                        
+                        # 根据旋转模式显示当前旋转
+                        if model_obj.rotation_mode == 'QUATERNION':
+                            euler = model_obj.rotation_quaternion.to_euler()
+                            print(f"  当前旋转(从四元数): X={euler.x*180/3.14159:.1f}° Y={euler.y*180/3.14159:.1f}° Z={euler.z*180/3.14159:.1f}°")
+                        else:
+                            print(f"  当前旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
+                    
+                    model_obj.location = Vector((0, 0, 0))
+                    
+                    # 根据旋转模式正确归零旋转
+                    if model_obj.rotation_mode == 'QUATERNION':
+                        model_obj.rotation_quaternion = (1, 0, 0, 0)
+                    elif 'AXIS_ANGLE' in model_obj.rotation_mode:
+                        model_obj.rotation_axis_angle = [0, 0, 0, 1]  # angle=0, axis=[0,0,1]
+                    else:
+                        model_obj.rotation_euler = (0, 0, 0)
+                    
+                    bpy.context.view_layer.update()
+                    
+                    if prefs.show_debug_info:
+                        print(f"  归零后位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
+                        print(f"  归零后旋转: X=0.0° Y=0.0° Z=0.0°")
+                    
+                    # 应用坐标系转换（针对目标引擎）
+                    self.apply_coordinate_transform(
+                        model_obj,
+                        prefs.target_engine,
+                        prefs,
+                        file_format
+                    )
+                    
+                    # 导出模型
+                    exported_path = self.export_model(model_obj, obj_config, output_dir, file_format, prefs)
+                    
+                    # 导出后恢复模型位置、旋转和缩放（用于Blender预览对比）
+                    model_obj.location = original_position
+                    model_obj.scale = original_scale
+                    
+                    # 恢复旋转（根据模式）
+                    if model_obj.rotation_mode == 'QUATERNION' and original_rotation_quat:
+                        model_obj.rotation_quaternion = original_rotation_quat
+                    elif 'AXIS_ANGLE' in model_obj.rotation_mode and original_rotation_axis_angle:
+                        model_obj.rotation_axis_angle = original_rotation_axis_angle
+                    elif original_rotation:
+                        model_obj.rotation_euler = original_rotation
+                    
+                    bpy.context.view_layer.update()
+                    
+                    if prefs.show_debug_info:
+                        print(f"[批量预览+导出] 导出后恢复变换: {model_obj.name}")
+                        print(f"  恢复位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
+                        
+                        # 根据旋转模式显示恢复后的旋转
+                        if model_obj.rotation_mode == 'QUATERNION':
+                            euler = model_obj.rotation_quaternion.to_euler()
+                            print(f"  恢复旋转(从四元数): X={euler.x*180/3.14159:.1f}° Y={euler.y*180/3.14159:.1f}° Z={euler.z*180/3.14159:.1f}°")
+                        else:
+                            print(f"  恢复旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
+                        
+                        print(f"  恢复缩放: X={model_obj.scale.x:.3f} Y={model_obj.scale.y:.3f} Z={model_obj.scale.z:.3f}")
+                    
+                    if exported_path:
+                        # 创建新的对象配置，rotation和position保持原始值
+                        new_obj_config = obj_config.copy()
+                        # rotation保持原始值，不修改（模型已归零导出，在引擎中通过JSON的rotation还原）
+                        # position保持原始值，不修改
+                        
+                        if prefs.show_debug_info:
+                            print(f"[批量预览+导出] 输出JSON:")
+                            print(f"  position: {new_obj_config.get('position')} (保持原始)")
+                            print(f"  rotation: {new_obj_config.get('rotation')} (保持原始，模型已归零导出)")
+                            print(f"  scale: {new_obj_config.get('scale')} (保持原始)")
+                        
+                        # 更新URL字段
+                        if '3d_url' in obj_config:
+                            new_obj_config['3d_url'] = exported_path
+                        elif 'output' in obj_config and 'url' in obj_config['output']:
+                            if 'output' not in new_obj_config:
+                                new_obj_config['output'] = {}
+                            new_obj_config['output']['url'] = exported_path
+                        else:
+                            if 'output' not in new_obj_config:
+                                new_obj_config['output'] = {}
+                            new_obj_config['output']['url'] = exported_path
+                        
+                        processed_objects.append(new_obj_config)
+                        
+                        if prefs.show_debug_info:
+                            print(f"[批量预览+导出] 导出成功: {exported_path}")
+                    
+                except Exception as e:
+                    self.report({'WARNING'}, f"导出模型 {obj_config.get('name', '未命名')} 失败: {str(e)}")
+                    if prefs.show_debug_info:
+                        import traceback
+                        traceback.print_exc()
             
             # 生成输出JSON
             output_config = config.copy()
@@ -1093,13 +938,7 @@ class OBJECT_OT_batch_box_preview_export(Operator):
             except Exception as e:
                 self.report({'WARNING'}, f"保存JSON失败: {str(e)}")
             
-            # 计算并输出总耗时
-            elapsed_time = time.time() - start_time
-            time_str = print_processing_summary(prefs, "批量预览+导出", success_count, failed_count, len(processed_objects), elapsed_time, prefs.processing_mode)
-            
-            self.report({'INFO'}, f"批量预览+导出完成: 成功 {success_count} 个, 失败 {failed_count} 个, 导出 {len(processed_objects)} 个")
-            self.report({'INFO'}, f"总耗时: {time_str}")
-            
+            self.report({'INFO'}, f"批量预览+导出完成: 成功 {success_count} 个, 失败 {failed_count} 个, 导出 {len(processed_objects)} 个, 保留 {len(model_box_pairs)} 个BOX")
             return {'FINISHED'}
             
         except Exception as e:
@@ -1107,370 +946,6 @@ class OBJECT_OT_batch_box_preview_export(Operator):
             import traceback
             traceback.print_exc()
             return {'CANCELLED'}
-    
-    def ensure_importers_enabled(self):
-        """确保glTF和FBX导入/导出插件已启用"""
-        try:
-            # 启用 glTF 2.0 插件
-            if not bpy.context.preferences.addons.get('io_scene_gltf2'):
-                bpy.ops.preferences.addon_enable(module='io_scene_gltf2')
-            
-            # 启用 FBX 插件
-            if not bpy.context.preferences.addons.get('io_scene_fbx'):
-                bpy.ops.preferences.addon_enable(module='io_scene_fbx')
-        except:
-            pass  # 如果已经启用或无法启用，忽略错误
-    
-    def execute_stream_mode(self, context, objects, auth_token, output_dir, prefs):
-        """流式处理模式：逐个处理并导出后删除模型"""
-        success_count = 0
-        failed_count = 0
-        processed_objects = []
-        
-        for idx, obj_config in enumerate(objects):
-            try:
-                self.report({'INFO'}, f"处理第 {idx+1}/{len(objects)} 个对象: {obj_config.get('name', '未命名')}")
-                
-                # 下载并导入模型
-                model_obj, file_format = download_and_import_model_helper(obj_config, auth_token, prefs, self.report)
-                if not model_obj:
-                    failed_count += 1
-                    continue
-                
-                # 应用JSON中的rotation和position到模型
-                apply_transform_to_model_helper(model_obj, obj_config, prefs, self.report)
-                
-                # 创建带position的参考Box
-                ref_box = create_reference_box_with_position_helper(obj_config, prefs, self.report)
-                if not ref_box:
-                    failed_count += 1
-                    continue
-                
-                # 执行完美重合对齐
-                align_model_to_box_preview_helper(model_obj, ref_box, context, prefs, self.report)
-                
-                # 保留Box
-                if prefs.show_debug_info:
-                    print(f"[批量预览+导出] ✓ 保留BOX: {ref_box.name}")
-                
-                # 使用用户设置的导出格式
-                export_format = '.glb' if prefs.export_format == 'GLB' else '.fbx'
-                
-                # 立即导出模型
-                exported_path = self.export_single_model(model_obj, obj_config, output_dir, export_format, prefs, context)
-                
-                if exported_path:
-                    # 创建新的对象配置，rotation和position保持原始值
-                    new_obj_config = obj_config.copy()
-                    
-                    # 打印输出JSON信息
-                    if prefs.show_debug_info:
-                        print(f"[批量预览+导出] 输出JSON:")
-                        print(f"  position: {new_obj_config.get('position')} (保持原始)")
-                        print(f"  rotation: {new_obj_config.get('rotation')} (保持原始，模型已归零导出)")
-                        print(f"  scale: {new_obj_config.get('scale')} (保持原始)")
-                    
-                    # 更新URL字段
-                    if '3d_url' in obj_config:
-                        new_obj_config['3d_url'] = exported_path
-                    elif 'output' in obj_config and 'url' in obj_config['output']:
-                        if 'output' not in new_obj_config:
-                            new_obj_config['output'] = {}
-                        new_obj_config['output']['url'] = exported_path
-                    else:
-                        if 'output' not in new_obj_config:
-                            new_obj_config['output'] = {}
-                        new_obj_config['output']['url'] = exported_path
-                    
-                    processed_objects.append(new_obj_config)
-                    success_count += 1
-                    
-                    if prefs.show_debug_info:
-                        print(f"[批量预览+导出] 导出成功: {exported_path}")
-                
-                # 删除模型对象以释放资源（保留BOX用于调试）
-                try:
-                    bpy.data.objects.remove(model_obj, do_unlink=True)
-                    if prefs.show_debug_info:
-                        print(f"[批量预览+导出] 已删除模型: {obj_config.get('name', '未命名')}")
-                except Exception as e:
-                    if prefs.show_debug_info:
-                        print(f"[批量预览+导出] 删除模型失败: {str(e)}")
-                
-            except Exception as e:
-                self.report({'WARNING'}, f"处理对象 {idx+1} 失败: {str(e)}")
-                failed_count += 1
-                if prefs.show_debug_info:
-                    import traceback
-                    traceback.print_exc()
-        
-        return success_count, failed_count, processed_objects
-    
-    def execute_batch_mode(self, context, objects, auth_token, output_dir, prefs):
-        """一次性处理模式：保持原有逻辑"""
-        success_count = 0
-        failed_count = 0
-        processed_objects = []
-        model_box_pairs = []  # 存储(模型, BOX, 配置, 导出格式)
-        
-        for idx, obj_config in enumerate(objects):
-            try:
-                self.report({'INFO'}, f"处理第 {idx+1}/{len(objects)} 个对象: {obj_config.get('name', '未命名')}")
-                
-                # 下载并导入模型
-                model_obj, file_format = download_and_import_model_helper(obj_config, auth_token, prefs, self.report)
-                if not model_obj:
-                    failed_count += 1
-                    continue
-                
-                # 应用JSON中的rotation和position到模型
-                apply_transform_to_model_helper(model_obj, obj_config, prefs, self.report)
-                
-                # 创建带position的参考Box
-                ref_box = create_reference_box_with_position_helper(obj_config, prefs, self.report)
-                if not ref_box:
-                    failed_count += 1
-                    continue
-                
-                # 执行完美重合对齐
-                align_model_to_box_preview_helper(model_obj, ref_box, context, prefs, self.report)
-                
-                # 保留Box，不删除
-                if prefs.show_debug_info:
-                    print(f"[批量预览+导出] ✓ 保留BOX: {ref_box.name}")
-                
-                # 使用用户设置的导出格式
-                export_format = '.glb' if prefs.export_format == 'GLB' else '.fbx'
-                
-                # 存储模型、BOX、配置和导出格式
-                model_box_pairs.append((model_obj, ref_box, obj_config, export_format))
-                success_count += 1
-                
-            except Exception as e:
-                self.report({'WARNING'}, f"处理对象 {idx+1} 失败: {str(e)}")
-                failed_count += 1
-                if prefs.show_debug_info:
-                    import traceback
-                    traceback.print_exc()
-        
-        # 导出所有成功处理的模型
-        format_name = 'GLB' if prefs.export_format == 'GLB' else 'FBX'
-        self.report({'INFO'}, f"开始导出 {len(model_box_pairs)} 个模型（格式：{format_name}）...")
-        
-        for model_obj, ref_box, obj_config, file_format in model_box_pairs:
-            try:
-                # 保存模型当前变换（和BOX一样的位置、旋转和缩放）
-                original_position = model_obj.location.copy()
-                original_scale = model_obj.scale.copy()
-                
-                # 保存旋转（根据模式）
-                original_rotation_quat = None
-                original_rotation_axis_angle = None
-                original_rotation = None
-                
-                if model_obj.rotation_mode == 'QUATERNION':
-                    original_rotation_quat = model_obj.rotation_quaternion.copy()
-                elif 'AXIS_ANGLE' in model_obj.rotation_mode:
-                    original_rotation_axis_angle = model_obj.rotation_axis_angle[:]
-                else:
-                    original_rotation = model_obj.rotation_euler.copy()
-                
-                # 关键：导出前将模型position和rotation归零
-                if prefs.show_debug_info:
-                    print(f"[批量预览+导出] 导出前归零position和rotation: {model_obj.name}")
-                    print(f"  当前位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
-                    
-                    # 根据旋转模式显示当前旋转
-                    if model_obj.rotation_mode == 'QUATERNION':
-                        euler = model_obj.rotation_quaternion.to_euler()
-                        print(f"  当前旋转(从四元数): X={euler.x*180/3.14159:.1f}° Y={euler.y*180/3.14159:.1f}° Z={euler.z*180/3.14159:.1f}°")
-                    else:
-                        print(f"  当前旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
-                
-                model_obj.location = Vector((0, 0, 0))
-                
-                # 根据旋转模式正确归零旋转
-                if model_obj.rotation_mode == 'QUATERNION':
-                    model_obj.rotation_quaternion = (1, 0, 0, 0)
-                elif 'AXIS_ANGLE' in model_obj.rotation_mode:
-                    model_obj.rotation_axis_angle = [0, 0, 0, 1]  # angle=0, axis=[0,0,1]
-                else:
-                    model_obj.rotation_euler = (0, 0, 0)
-                
-                bpy.context.view_layer.update()
-                
-                if prefs.show_debug_info:
-                    print(f"  归零后位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
-                    print(f"  归零后旋转: X=0.0° Y=0.0° Z=0.0°")
-                
-                # 应用坐标系转换（针对目标引擎）
-                self.apply_coordinate_transform(
-                    model_obj,
-                    prefs.target_engine,
-                    prefs,
-                    file_format
-                )
-                
-                # 导出模型
-                exported_path = self.export_model(model_obj, obj_config, output_dir, file_format, prefs)
-                
-                # 导出后恢复模型位置、旋转和缩放（用于Blender预览对比）
-                model_obj.location = original_position
-                model_obj.scale = original_scale
-                
-                # 恢复旋转（根据模式）
-                if model_obj.rotation_mode == 'QUATERNION' and original_rotation_quat:
-                    model_obj.rotation_quaternion = original_rotation_quat
-                elif 'AXIS_ANGLE' in model_obj.rotation_mode and original_rotation_axis_angle:
-                    model_obj.rotation_axis_angle = original_rotation_axis_angle
-                elif original_rotation:
-                    model_obj.rotation_euler = original_rotation
-                
-                bpy.context.view_layer.update()
-                
-                if prefs.show_debug_info:
-                    print(f"[批量预览+导出] 导出后恢复变换: {model_obj.name}")
-                    print(f"  恢复位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
-                    
-                    # 根据旋转模式显示恢复后的旋转
-                    if model_obj.rotation_mode == 'QUATERNION':
-                        euler = model_obj.rotation_quaternion.to_euler()
-                        print(f"  恢复旋转(从四元数): X={euler.x*180/3.14159:.1f}° Y={euler.y*180/3.14159:.1f}° Z={euler.z*180/3.14159:.1f}°")
-                    else:
-                        print(f"  恢复旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
-                    
-                    print(f"  恢复缩放: X={model_obj.scale.x:.3f} Y={model_obj.scale.y:.3f} Z={model_obj.scale.z:.3f}")
-                
-                if exported_path:
-                    # 创建新的对象配置，rotation和position保持原始值
-                    new_obj_config = obj_config.copy()
-                    # rotation保持原始值，不修改（模型已归零导出，在引擎中通过JSON的rotation还原）
-                    # position保持原始值，不修改
-                    
-                    if prefs.show_debug_info:
-                        print(f"[批量预览+导出] 输出JSON:")
-                        print(f"  position: {new_obj_config.get('position')} (保持原始)")
-                        print(f"  rotation: {new_obj_config.get('rotation')} (保持原始，模型已归零导出)")
-                        print(f"  scale: {new_obj_config.get('scale')} (保持原始)")
-                    
-                    # 更新URL字段
-                    if '3d_url' in obj_config:
-                        new_obj_config['3d_url'] = exported_path
-                    elif 'output' in obj_config and 'url' in obj_config['output']:
-                        if 'output' not in new_obj_config:
-                            new_obj_config['output'] = {}
-                        new_obj_config['output']['url'] = exported_path
-                    else:
-                        if 'output' not in new_obj_config:
-                            new_obj_config['output'] = {}
-                        new_obj_config['output']['url'] = exported_path
-                    
-                    processed_objects.append(new_obj_config)
-                    
-                    if prefs.show_debug_info:
-                        print(f"[批量预览+导出] 导出成功: {exported_path}")
-                
-            except Exception as e:
-                self.report({'WARNING'}, f"导出模型 {obj_config.get('name', '未命名')} 失败: {str(e)}")
-                if prefs.show_debug_info:
-                    import traceback
-                    traceback.print_exc()
-        
-        return success_count, failed_count, processed_objects
-    
-    def export_single_model(self, model_obj, obj_config, output_dir, file_format, prefs, context):
-        """导出单个模型（归零、导出、恢复）- 用于流式处理"""
-        try:
-            # 保存模型当前变换（和BOX一样的位置、旋转和缩放）
-            original_position = model_obj.location.copy()
-            original_scale = model_obj.scale.copy()
-            
-            # 保存旋转（根据模式）
-            original_rotation_quat = None
-            original_rotation_axis_angle = None
-            original_rotation = None
-            
-            if model_obj.rotation_mode == 'QUATERNION':
-                original_rotation_quat = model_obj.rotation_quaternion.copy()
-            elif 'AXIS_ANGLE' in model_obj.rotation_mode:
-                original_rotation_axis_angle = model_obj.rotation_axis_angle[:]
-            else:
-                original_rotation = model_obj.rotation_euler.copy()
-            
-            # 关键：导出前将模型position和rotation归零
-            if prefs.show_debug_info:
-                print(f"[批量预览+导出] 导出前归零position和rotation: {model_obj.name}")
-                print(f"  当前位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
-                
-                # 根据旋转模式显示当前旋转
-                if model_obj.rotation_mode == 'QUATERNION':
-                    euler = model_obj.rotation_quaternion.to_euler()
-                    print(f"  当前旋转(从四元数): X={euler.x*180/3.14159:.1f}° Y={euler.y*180/3.14159:.1f}° Z={euler.z*180/3.14159:.1f}°")
-                else:
-                    print(f"  当前旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
-            
-            model_obj.location = Vector((0, 0, 0))
-            
-            # 根据旋转模式正确归零旋转
-            if model_obj.rotation_mode == 'QUATERNION':
-                model_obj.rotation_quaternion = (1, 0, 0, 0)
-            elif 'AXIS_ANGLE' in model_obj.rotation_mode:
-                model_obj.rotation_axis_angle = [0, 0, 0, 1]  # angle=0, axis=[0,0,1]
-            else:
-                model_obj.rotation_euler = (0, 0, 0)
-            
-            bpy.context.view_layer.update()
-            
-            if prefs.show_debug_info:
-                print(f"  归零后位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
-                print(f"  归零后旋转: X=0.0° Y=0.0° Z=0.0°")
-            
-            # 应用坐标系转换（针对目标引擎）
-            self.apply_coordinate_transform(
-                model_obj,
-                prefs.target_engine,
-                prefs,
-                file_format
-            )
-            
-            # 导出模型
-            exported_path = self.export_model(model_obj, obj_config, output_dir, file_format, prefs)
-            
-            # 导出后恢复模型位置、旋转和缩放（用于继续在Blender中查看）
-            model_obj.location = original_position
-            model_obj.scale = original_scale
-            
-            # 恢复旋转（根据模式）
-            if model_obj.rotation_mode == 'QUATERNION' and original_rotation_quat:
-                model_obj.rotation_quaternion = original_rotation_quat
-            elif 'AXIS_ANGLE' in model_obj.rotation_mode and original_rotation_axis_angle:
-                model_obj.rotation_axis_angle = original_rotation_axis_angle
-            elif original_rotation:
-                model_obj.rotation_euler = original_rotation
-            
-            bpy.context.view_layer.update()
-            
-            if prefs.show_debug_info:
-                print(f"[批量预览+导出] 导出后恢复变换: {model_obj.name}")
-                print(f"  恢复位置: X={model_obj.location.x:.3f} Y={model_obj.location.y:.3f} Z={model_obj.location.z:.3f}")
-                
-                # 根据旋转模式显示恢复后的旋转
-                if model_obj.rotation_mode == 'QUATERNION':
-                    euler = model_obj.rotation_quaternion.to_euler()
-                    print(f"  恢复旋转(从四元数): X={euler.x*180/3.14159:.1f}° Y={euler.y*180/3.14159:.1f}° Z={euler.z*180/3.14159:.1f}°")
-                else:
-                    print(f"  恢复旋转: X={model_obj.rotation_euler.x*180/3.14159:.1f}° Y={model_obj.rotation_euler.y*180/3.14159:.1f}° Z={model_obj.rotation_euler.z*180/3.14159:.1f}°")
-                
-                print(f"  恢复缩放: X={model_obj.scale.x:.3f} Y={model_obj.scale.y:.3f} Z={model_obj.scale.z:.3f}")
-            
-            return exported_path
-            
-        except Exception as e:
-            self.report({'WARNING'}, f"导出模型失败: {str(e)}")
-            if prefs.show_debug_info:
-                import traceback
-                traceback.print_exc()
-            return None
     
     def apply_coordinate_transform(self, model_obj, target_engine, prefs, export_format=None):
         """根据目标引擎应用坐标系转换"""

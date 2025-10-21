@@ -91,20 +91,6 @@ class BlenderModelAligner:
                                "• 不做任何坐标转换\n"
                                "• 直接导出对齐后的模型"
                 }),
-                "processing_mode": (["STREAM", "BATCH"], {
-                    "default": "STREAM",
-                    "tooltip": "批量处理模式：\n\n"
-                               "STREAM（流式处理）- 推荐：\n"
-                               "• 逐个处理并导出后删除模型\n"
-                               "• 内存占用小，稳定性高\n"
-                               "• 适合大量模型处理\n"
-                               "• 处理过程中只保留当前模型在内存中\n\n"
-                               "BATCH（一次性处理）：\n"
-                               "• 全部对齐后统一导出\n"
-                               "• 速度稍快但内存占用大\n"
-                               "• 适合少量模型处理\n"
-                               "• 所有模型会同时加载到Blender场景中"
-                }),
             }
         }
     
@@ -113,7 +99,7 @@ class BlenderModelAligner:
     FUNCTION = "align_models"
     CATEGORY = "VVL/Blender"
     
-    def align_models(self, json_config: str, export_format: str, blender_path: str, target_engine: str, processing_mode: str) -> Tuple[str]:
+    def align_models(self, json_config: str, export_format: str, blender_path: str, target_engine: str) -> Tuple[str]:
         """
         执行批量模型对齐
         
@@ -122,8 +108,6 @@ class BlenderModelAligner:
             export_format: 导出格式 (GLB/FBX)
             blender_path: Blender可执行文件路径
             target_engine: 目标引擎 (UE/UNITY/BLENDER/NONE)
-            processing_mode: 处理模式 (STREAM/BATCH)
-            
         Returns:
             处理后的JSON文本
         """
@@ -155,118 +139,128 @@ class BlenderModelAligner:
             output_dir = os.path.join(output_base_dir, "model_alignment")
             os.makedirs(output_dir, exist_ok=True)
             print(f"[Aligner] 输出目录: {output_dir}")
-            
-            # 4. 创建临时目录存放JSON
-            temp_dir = tempfile.mkdtemp(prefix="blender_aligner_")
-            input_json_path = os.path.join(temp_dir, "input_config.json")
-            output_json_path = os.path.join(temp_dir, "output_config.json")
-            
-            # 写入输入JSON
-            with open(input_json_path, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=2, ensure_ascii=False)
-            print(f"[Aligner] 输入JSON: {input_json_path}")
-            print(f"[Aligner] 输出JSON: {output_json_path}")
-            
-            # 5. 获取对齐脚本路径
+
             script_dir = os.path.dirname(os.path.abspath(__file__))
             alignment_script = os.path.join(script_dir, "alignment_script.py")
             alignment_ops_script = os.path.join(script_dir, "alignment_ops.py")
-            
+
             if not os.path.exists(alignment_script):
                 error_msg = f"对齐脚本不存在: {alignment_script}"
                 print(f"[Aligner] 错误: {error_msg}")
                 return (json.dumps({"error": error_msg}, ensure_ascii=False),)
-            
+
             # 检查 alignment_ops.py 是否存在（必需依赖）
             if not os.path.exists(alignment_ops_script):
                 error_msg = f"核心函数库不存在: {alignment_ops_script}"
                 print(f"[Aligner] 错误: {error_msg}")
                 return (json.dumps({"error": error_msg}, ensure_ascii=False),)
-            
+
             print(f"[Aligner] 对齐脚本: {alignment_script}")
             print(f"[Aligner] 核心函数库: {alignment_ops_script}")
-            
-            # 6. 构建Blender命令
-            blender_cmd = [
-                blender_path,
-                "--background",
-                "--python", alignment_script,
-                "--",
-                input_json_path,
-                output_dir,
-                export_format,
-                target_engine,
-                processing_mode,
-                output_json_path
-            ]
-            
-            print(f"[Aligner] 执行命令: {' '.join(blender_cmd)}")
-            print(f"[Aligner] 参数:")
-            print(f"  - 导出格式: {export_format}")
-            print(f"  - 目标引擎: {target_engine}")
-            print(f"  - 处理模式: {processing_mode}")
-            print(f"  - 输出目录: {output_dir}")
-            
-            # 7. 执行Blender
-            print("\n[Aligner] 开始执行Blender对齐...")
-            result = subprocess.run(
-                blender_cmd,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',  # 明确指定 UTF-8 编码
-                errors='replace',  # 遇到无法解码的字符时替换
-                timeout=3600  # 1小时超时
-            )
-            
-            # 打印Blender输出
-            if result.stdout:
-                print("\n[Blender输出]:")
-                print(result.stdout)
-            
-            if result.stderr:
-                print("\n[Blender错误]:")
-                print(result.stderr)
-            
-            # 8. 检查执行结果
-            if result.returncode != 0:
-                error_msg = f"Blender执行失败，返回码: {result.returncode}"
-                if result.stderr:
-                    error_msg += f"\n错误信息: {result.stderr[-500:]}"  # 只取最后500字符
-                print(f"[Aligner] 错误: {error_msg}")
-                return (json.dumps({"error": error_msg}, ensure_ascii=False),)
-            
-            # 9. 读取输出JSON
-            if not os.path.exists(output_json_path):
-                error_msg = "未生成输出JSON文件"
-                print(f"[Aligner] 错误: {error_msg}")
-                return (json.dumps({"error": error_msg}, ensure_ascii=False),)
-            
-            with open(output_json_path, 'r', encoding='utf-8') as f:
-                output_data = json.load(f)
-            
-            # 10. 清理临时文件
-            try:
-                import shutil
-                shutil.rmtree(temp_dir)
-                print(f"[Aligner] 已清理临时目录: {temp_dir}")
-            except:
-                pass
-            
-            # 11. 返回结果
-            result_json = json.dumps(output_data, ensure_ascii=False, indent=2)
-            
-            print("\n" + "="*60)
-            print("VVL Blender Model Aligner - 处理完成")
-            print(f"成功处理 {len(output_data.get('objects', []))} 个对象")
-            print("="*60 + "\n")
-            
+
+            # 切分 objects
+            object_groups = []
+            size = 10
+            if len(objects) > size:
+                for i in range(0, len(objects), size):
+                    object_groups.append(objects[i:i + size])
+                print(f"[Aligner] 对象过多，分成 {len(object_groups)} 组，每组最多 {size} 个对象")
+            else:
+                object_groups.append(objects)
+            config_data['objects'] = []  # 清空原始对象，按组处理
+
+            for idx, group in enumerate(object_groups):
+                print(f"[Aligner] 处理第 {idx + 1} 组，共 {len(group)} 个对象")
+                # 处理每组对象
+                temp_dir = tempfile.mkdtemp(prefix=f"blender_aligner_group_{idx + 1}_")
+                input_json_path = os.path.join(temp_dir, "input_config.json")
+                output_json_path = os.path.join(temp_dir, "output_config.json")
+                temp_config_data = config_data.copy()
+                temp_config_data['objects'] = group
+                with open(input_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(temp_config_data, f, indent=2, ensure_ascii=False)
+                print(f"[Aligner] 输入JSON: {input_json_path}")
+                print(f"[Aligner] 输出JSON: {output_json_path}")
+
+                # 6. 构建Blender命令
+                blender_cmd = [
+                    blender_path,
+                    "--background",
+                    "--python", alignment_script,
+                    "--",
+                    input_json_path,
+                    output_dir,
+                    export_format,
+                    target_engine,
+                    output_json_path
+                ]
+
+                print(f"[Aligner] 执行命令: {' '.join(blender_cmd)}")
+                print(f"[Aligner] 参数:")
+                print(f"  - 导出格式: {export_format}")
+                print(f"  - 目标引擎: {target_engine}")
+                print(f"  - 输出目录: {output_dir}")
+
+                # 7. 执行Blender
+                try:
+                    print("\n[Aligner] 开始执行Blender对齐...")
+                    result = subprocess.run(
+                        blender_cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',  # 明确指定 UTF-8 编码
+                        errors='replace',  # 遇到无法解码的字符时替换
+                        timeout=3600  # 1小时超时
+                    )
+
+                    # 打印Blender输出
+                    if result.stdout:
+                        print("\n[Blender输出]:")
+                        print(result.stdout)
+
+                    if result.stderr:
+                        print("\n[Blender错误]:")
+                        print(result.stderr)
+
+                    # 8. 检查执行结果
+                    if result.returncode != 0:
+                        error_msg = f"Blender执行失败，返回码: {result.returncode}"
+                        if result.stderr:
+                            error_msg += f"\n错误信息: {result.stderr[-500:]}"  # 只取最后500字符
+                        print(f"[Aligner] 错误: {error_msg}")
+                        return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+
+                    # 9. 读取输出JSON
+                    if not os.path.exists(output_json_path):
+                        error_msg = "未生成输出JSON文件"
+                        print(f"[Aligner] 错误: {error_msg}")
+                        return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+
+                    with open(output_json_path, 'r', encoding='utf-8') as f:
+                        output_data = json.load(f)
+                    config_data['objects'].extend(output_data.get('objects', []))
+                    print(f"[Aligner] 第 {idx + 1} 组处理完成，成功对齐 {len(output_data.get('objects', []))} 个对象")
+                    # 10. 清理临时文件
+                    try:
+                        import shutil
+                        shutil.rmtree(temp_dir)
+                        print(f"[Aligner] 已清理临时目录: {temp_dir}")
+                    except:
+                        pass
+
+                    print("\n" + "="*60)
+                    print("VVL Blender Model Aligner - 处理完成")
+                    print(f"成功处理 {len(output_data.get('objects', []))} 个对象")
+                    print("="*60 + "\n")
+
+                except subprocess.TimeoutExpired:
+                    error_msg = "Blender执行超时（超过1小时）"
+                    print(f"[Aligner] 错误: {error_msg}")
+                    return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+
+            result_json = json.dumps(config_data, ensure_ascii=False)
             return (result_json,)
-            
-        except subprocess.TimeoutExpired:
-            error_msg = "Blender执行超时（超过1小时）"
-            print(f"[Aligner] 错误: {error_msg}")
-            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
-            
+
         except Exception as e:
             error_msg = f"批量对齐失败: {str(e)}"
             print(f"[Aligner] 错误: {error_msg}")
