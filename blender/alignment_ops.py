@@ -480,8 +480,194 @@ def execute_perfect_align_batch_helper(ref_obj, target_obj, prefs):
     bpy.context.view_layer.update()
 
 
+def sanitize_materials_for_export(obj, prefs):
+    """清理材质节点以避免导出时的贴图问题（增强版：处理超大纹理、损坏贴图）"""
+    try:
+        cleaned_count = 0
+        removed_count = 0
+        downscaled_count = 0
+        
+        # 贴图尺寸安全阈值（像素）
+        MAX_SAFE_TEXTURE_SIZE = 1024  # 超过4K认为是超大纹理
+        MAX_TEXTURE_PIXELS = 1048576  # 1024x1024 = 1M像素
+        
+        # 遍历对象及其子对象的所有材质
+        all_objects = [obj] + list(obj.children_recursive)
+        
+        for current_obj in all_objects:
+            if not hasattr(current_obj, 'material_slots'):
+                continue
+                
+            for mat_slot in current_obj.material_slots:
+                if not mat_slot.material:
+                    continue
+                    
+                mat = mat_slot.material
+                if not mat.use_nodes:
+                    continue
+                
+                # 检查材质节点树中的图像纹理节点
+                nodes_to_remove = []
+                
+                for node in mat.node_tree.nodes:
+                    if node.type != 'TEX_IMAGE' or not node.image:
+                        continue
+                    
+                    image = node.image
+                    should_remove = False
+                    should_downscale = False
+                    
+                    # === 1. 检查文件路径问题 ===
+                    if image.filepath and not os.path.exists(bpy.path.abspath(image.filepath)):
+                        if prefs.show_debug_info:
+                            print(f"[材质清理] 发现缺失贴图: {image.name} -> {image.filepath}")
+                        # 尝试移除路径引用，避免导出器访问不存在的文件
+                        should_remove = True
+                        cleaned_count += 1
+                    
+                    # === 2. 检查贴图尺寸 ===
+                    try:
+                        width = image.size[0]
+                        height = image.size[1]
+                        total_pixels = width * height
+                        
+                        if width > MAX_SAFE_TEXTURE_SIZE or height > MAX_SAFE_TEXTURE_SIZE or total_pixels > MAX_TEXTURE_PIXELS:
+                            if prefs.show_debug_info:
+                                print(f"[材质清理] 发现超大纹理: {image.name} ({width}x{height}, {total_pixels/1000000:.1f}M像素)")
+                            
+                            # 尝试降级处理
+                            should_downscale = True
+                    except Exception as size_error:
+                        if prefs.show_debug_info:
+                            print(f"[材质清理] 无法读取贴图尺寸: {image.name} -> {str(size_error)}")
+                        # 无法读取尺寸的贴图可能已损坏
+                        should_remove = True
+                        cleaned_count += 1
+                    
+                    # === 3. 检查贴图格式和通道数 ===
+                    try:
+                        # 检查是否为高风险格式（EXR、TIFF 16位、S3TC压缩等）
+                        if image.file_format in ['OPEN_EXR', 'OPEN_EXR_MULTILAYER', 'HDR']:
+                            if prefs.show_debug_info:
+                                print(f"[材质清理] 发现高风险格式贴图: {image.name} (格式: {image.file_format})")
+                            # HDR/EXR格式容易触发OpenImageIO崩溃
+                            should_downscale = True
+                        
+                        # 检查是否为空贴图
+                        if image.pixels is None or len(image.pixels) == 0:
+                            if prefs.show_debug_info:
+                                print(f"[材质清理] 发现空贴图: {image.name}")
+                            should_remove = True
+                            cleaned_count += 1
+                    except Exception as format_error:
+                        if prefs.show_debug_info:
+                            print(f"[材质清理] 检查贴图格式失败: {image.name} -> {str(format_error)}")
+                        should_remove = True
+                        cleaned_count += 1
+                    
+                    # === 4. 执行降级处理 ===
+                    if should_downscale and not should_remove:
+                        try:
+                            # 创建降级版本（缩小到安全尺寸）
+                            original_width = image.size[0]
+                            original_height = image.size[1]
+                            
+                            # 计算安全缩放比例
+                            scale_factor = min(
+                                MAX_SAFE_TEXTURE_SIZE / original_width,
+                                MAX_SAFE_TEXTURE_SIZE / original_height,
+                                1.0  # 不放大
+                            )
+                            
+                            if scale_factor < 1.0:
+                                new_width = int(original_width * scale_factor)
+                                new_height = int(original_height * scale_factor)
+                                
+                                if prefs.show_debug_info:
+                                    print(f"[材质清理] 降级纹理: {image.name} {original_width}x{original_height} -> {new_width}x{new_height}")
+                                
+                                # 创建新的降级图像
+                                downscaled_image = image.copy()
+                                downscaled_image.name = f"{image.name}_safe"
+                                downscaled_image.scale(new_width, new_height)
+                                
+                                # 转换为PNG格式（最安全）
+                                downscaled_image.file_format = 'PNG'
+                                
+                                # 打包到blend文件中
+                                downscaled_image.pack()
+                                
+                                # 替换节点中的图像引用
+                                node.image = downscaled_image
+                                
+                                downscaled_count += 1
+                                
+                                if prefs.show_debug_info:
+                                    print(f"[材质清理] 已替换为降级版本: {downscaled_image.name}")
+                            else:
+                                # 尺寸在安全范围内，但格式不安全，尝试转换格式
+                                if image.file_format != 'PNG':
+                                    image.file_format = 'PNG'
+                                    if prefs.show_debug_info:
+                                        print(f"[材质清理] 转换格式为PNG: {image.name}")
+                                
+                                # 打包图像
+                                if not image.packed_file:
+                                    image.pack()
+                                    if prefs.show_debug_info:
+                                        print(f"[材质清理] 已打包贴图: {image.name}")
+                        
+                        except Exception as downscale_error:
+                            if prefs.show_debug_info:
+                                print(f"[材质清理] 降级失败，将移除节点: {image.name} -> {str(downscale_error)}")
+                            should_remove = True
+                    
+                    # === 5. 移除有问题的节点 ===
+                    if should_remove:
+                        nodes_to_remove.append(node)
+                        if prefs.show_debug_info:
+                            print(f"[材质清理] 标记移除节点: {node.name} (贴图: {image.name})")
+                    
+                    # === 6. 安全打包（未降级且未移除的正常贴图） ===
+                    elif not should_downscale:
+                        if not image.packed_file and image.filepath:
+                            try:
+                                # 尝试打包图像以避免路径问题
+                                image.pack()
+                                if prefs.show_debug_info:
+                                    print(f"[材质清理] 已打包贴图: {image.name}")
+                            except Exception as pack_error:
+                                if prefs.show_debug_info:
+                                    print(f"[材质清理] 打包失败，将移除节点: {image.name} -> {str(pack_error)}")
+                                nodes_to_remove.append(node)
+                
+                # 移除标记的节点
+                for node in nodes_to_remove:
+                    try:
+                        mat.node_tree.nodes.remove(node)
+                        removed_count += 1
+                        if prefs.show_debug_info:
+                            print(f"[材质清理] 已移除问题节点: {node.name}")
+                    except Exception as remove_error:
+                        if prefs.show_debug_info:
+                            print(f"[材质清理] 移除节点失败: {node.name} -> {str(remove_error)}")
+        
+        # 输出统计信息
+        if prefs.show_debug_info:
+            print(f"[材质清理] 清理完成:")
+            print(f"  - 发现问题贴图: {cleaned_count} 个")
+            print(f"  - 降级纹理: {downscaled_count} 个")
+            print(f"  - 移除节点: {removed_count} 个")
+        
+    except Exception as e:
+        if prefs.show_debug_info:
+            print(f"[材质清理] 清理过程出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+
 def export_model_glb_helper(report_func, model_obj, obj_config, output_dir, prefs):
-    """导出模型为GLB格式，贴图嵌入"""
+    """导出模型为GLB格式，贴图嵌入（优化参数避免OpenImageIO崩溃）"""
     try:
         model_name = obj_config.get('name', 'model')
         # 清理文件名，移除不合法字符
@@ -493,6 +679,9 @@ def export_model_glb_helper(report_func, model_obj, obj_config, output_dir, pref
         if prefs.show_debug_info:
             print(f"[批量对齐] 准备导出GLB: {model_name} -> {output_path}")
             print(f"[批量对齐] 目标引擎检查: target_engine = '{prefs.target_engine}'")
+        
+        # ★ 导出前清理材质，避免贴图问题
+        sanitize_materials_for_export(model_obj, prefs)
         
         # 取消所有选择
         bpy.ops.object.select_all(action='DESELECT')
@@ -507,22 +696,90 @@ def export_model_glb_helper(report_func, model_obj, obj_config, output_dir, pref
         if prefs.show_debug_info:
             print(f"[批量对齐] 选中对象: {model_obj.name} 及其 {len(model_obj.children_recursive)} 个子对象")
         
-        # 导出为GLB格式
-        bpy.ops.export_scene.gltf(
-            filepath=output_path,
-            export_format='GLB',
-            use_selection=True,
-            export_texcoords=True,
-            export_normals=True,
-            export_materials='EXPORT',
-            export_image_format='AUTO',
-        )
-        
-        if prefs.show_debug_info:
-            file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            print(f"[批量对齐] GLB导出完成: {output_path} ({file_size_mb:.2f} MB)")
-        
-        return output_path
+        # 导出为GLB格式（优化参数以避免OpenImageIO崩溃）
+        try:
+            bpy.ops.export_scene.gltf(
+                filepath=output_path,
+                export_format='GLB',
+                use_selection=True,
+                export_texcoords=True,
+                export_normals=True,
+                export_materials='EXPORT',
+                export_animations=False,
+                # ★ 关键优化：强制转换贴图为PNG，避免OpenImageIO读取原始格式时崩溃
+                export_image_format='PNG',
+                export_keep_originals=False,
+                # ★ 嵌入贴图到GLB
+                export_texture_dir='',
+                # ★ 压缩优化
+                export_draco_mesh_compression_enable=False,  # 禁用Draco压缩，避免额外的兼容性问题
+                # ★ 其他安全选项
+                export_yup=True,
+                check_existing=False,
+            )
+            
+            if prefs.show_debug_info:
+                file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                print(f"[批量对齐] GLB导出完成: {output_path} ({file_size_mb:.2f} MB)")
+            
+            return output_path
+            
+        except Exception as export_error:
+            # 如果PNG导出失败，尝试使用JPEG作为备选方案
+            if prefs.show_debug_info:
+                print(f"[批量对齐] PNG导出失败，尝试JPEG格式...")
+            
+            try:
+                bpy.ops.export_scene.gltf(
+                    filepath=output_path,
+                    export_format='GLB',
+                    use_selection=True,
+                    export_texcoords=True,
+                    export_normals=True,
+                    export_materials='EXPORT',
+                    export_animations=False,
+                    export_image_format='JPEG',  # 备选：JPEG
+                    export_keep_originals=False,
+                    export_texture_dir='',
+                    export_draco_mesh_compression_enable=False,
+                    export_yup=True,
+                    check_existing=False,
+                )
+                
+                if prefs.show_debug_info:
+                    file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                    print(f"[批量对齐] GLB导出完成（JPEG格式）: {output_path} ({file_size_mb:.2f} MB)")
+                
+                return output_path
+                
+            except Exception as jpeg_error:
+                # 如果JPEG也失败，尝试不导出贴图
+                if prefs.show_debug_info:
+                    print(f"[批量对齐] JPEG导出也失败，尝试不导出材质...")
+                
+                try:
+                    bpy.ops.export_scene.gltf(
+                        filepath=output_path,
+                        export_format='GLB',
+                        use_selection=True,
+                        export_texcoords=True,
+                        export_normals=True,
+                        export_materials='PLACEHOLDER',  # 仅导出占位符材质
+                        export_animations=False,
+                        export_draco_mesh_compression_enable=False,
+                        export_yup=True,
+                        check_existing=False,
+                    )
+                    
+                    if prefs.show_debug_info:
+                        file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                        print(f"[批量对齐] GLB导出完成（无材质）: {output_path} ({file_size_mb:.2f} MB)")
+                        print(f"[批量对齐] ⚠ 警告：由于贴图问题，该模型仅包含几何体")
+                    
+                    return output_path
+                    
+                except Exception as final_error:
+                    raise final_error
     
     except Exception as e:
         report_func({'WARNING'}, f"导出GLB失败: {str(e)}")
