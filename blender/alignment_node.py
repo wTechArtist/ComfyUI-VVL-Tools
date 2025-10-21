@@ -91,6 +91,20 @@ class BlenderModelAligner:
                                "• 不做任何坐标转换\n"
                                "• 直接导出对齐后的模型"
                 }),
+                "processing_mode": (["STREAM", "BATCH"], {
+                    "default": "STREAM",
+                    "tooltip": "批量处理模式：\n\n"
+                               "STREAM（流式处理）- 推荐：\n"
+                               "• 逐个处理并导出后删除模型\n"
+                               "• 内存占用小，稳定性高\n"
+                               "• 适合大量模型处理\n"
+                               "• 处理过程中只保留当前模型在内存中\n\n"
+                               "BATCH（一次性处理）：\n"
+                               "• 全部对齐后统一导出\n"
+                               "• 速度稍快但内存占用大\n"
+                               "• 适合少量模型处理\n"
+                               "• 所有模型会同时加载到Blender场景中"
+                }),
             }
         }
     
@@ -99,7 +113,7 @@ class BlenderModelAligner:
     FUNCTION = "align_models"
     CATEGORY = "VVL/Blender"
     
-    def align_models(self, json_config: str, export_format: str, blender_path: str, target_engine: str) -> Tuple[str]:
+    def align_models(self, json_config: str, export_format: str, blender_path: str, target_engine: str, processing_mode: str) -> Tuple[str]:
         """
         执行批量模型对齐
         
@@ -108,6 +122,7 @@ class BlenderModelAligner:
             export_format: 导出格式 (GLB/FBX)
             blender_path: Blender可执行文件路径
             target_engine: 目标引擎 (UE/UNITY/BLENDER/NONE)
+            processing_mode: 处理模式 (STREAM/BATCH)
             
         Returns:
             处理后的JSON文本
@@ -181,6 +196,7 @@ class BlenderModelAligner:
                 output_dir,
                 export_format,
                 target_engine,
+                processing_mode,
                 output_json_path
             ]
             
@@ -188,6 +204,7 @@ class BlenderModelAligner:
             print(f"[Aligner] 参数:")
             print(f"  - 导出格式: {export_format}")
             print(f"  - 目标引擎: {target_engine}")
+            print(f"  - 处理模式: {processing_mode}")
             print(f"  - 输出目录: {output_dir}")
             
             # 7. 执行Blender
